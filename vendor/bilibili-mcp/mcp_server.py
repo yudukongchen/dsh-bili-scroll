@@ -14,6 +14,8 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ③ 登录成功后凭证**原子写**（先写 .tmp 再 os.replace）
 #      ④ `bili_comments` 把抓取异常带进返回（风控 -412 不再伪装成"这条视频 0 条评论"）
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
+#      ⑥ 本地表情包库：`bili_emote_list`（只读）+ `bili_reply` 的 `emote` 参数（贴图评论），
+#         库目录由宿主的 `BILI_MEME_DIR` 下发（见下）
 import asyncio
 import json
 import base64
@@ -34,6 +36,10 @@ from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 # ========== 初始化 ==========
 
 CRED_FILE = Path(__file__).parent / "bili_credential.json"
+
+# ⭐ 本地表情包库（放着 catalog.json 的那个目录）—— 由宿主通过 overlay 的 env 下发；
+#    没给就退回"家里那份 memes/"（给了但那儿没库也不报错，只是贴不了图）。
+MEME_DIR = Path(os.environ.get("BILI_MEME_DIR") or (Path(__file__).parent / "memes"))
 
 mcp = FastMCP("bilibili-mcp")
 
@@ -509,17 +515,109 @@ async def bili_video_info(bvid: str) -> str:
 
 # ========== Tool 6: 回复评论 ==========
 
+# ⭐ 表情包库的读法（贴图评论要用）。规矩就两条：
+#    ① **图先在本地找齐、验好，再发** —— 图有问题就当纯文字发。评论本身是正经事，
+#       不能因为一张图找不到就整条不发 ✓
+#    ② 找不到就说清楚**错在哪**（库在哪、有哪些 id），别让模型瞎猜重试 ✗
+_EMOTE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_EMOTE_MAX_BYTES = 8 * 1024 * 1024          # B站 图床单张 8MB
+
+
+def _load_meme_catalog():
+    """读表情包库的 catalog.json。返回 (catalog, error)，两者只有一个非空。"""
+    path = MEME_DIR / "catalog.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None, f"表情包库不在这儿：{path}（BILI_MEME_DIR 要指向放着 catalog.json 的目录）"
+    except Exception as e:
+        return None, f"读不了 {path}：{e}"
+    if not isinstance(data, dict) or not isinstance(data.get("emotes"), list) or not data["emotes"]:
+        return None, f"{path} 里没有 emotes（格式不对？）"
+    return data, ""
+
+
+def _resolve_emote(emote_id: str):
+    """表情 id → 本地图文件。返回 (path, entry, error)，前两个只会有一种非空。"""
+    eid = str(emote_id or "").strip().lstrip("#").lower()
+    if not eid:
+        return None, None, "没给表情 id"
+    cat, err = _load_meme_catalog()
+    if err:
+        return None, None, err
+    hit = None
+    for e in cat.get("emotes") or []:
+        if isinstance(e, dict) and str(e.get("id", "")).strip().lower() == eid:
+            hit = e
+            break
+    if hit is None:
+        ids = "、".join(str(e.get("id", "")) for e in (cat.get("emotes") or []) if isinstance(e, dict))
+        return None, None, f"表情库里没有 id「{eid}」；现有：{ids}"
+    path = MEME_DIR / str(hit.get("file") or "")
+    if not path.is_file():
+        return None, None, f"表情「{eid}」的图不在：{path}"
+    if path.suffix.lower() not in _EMOTE_EXTS:
+        return None, None, f"表情「{eid}」的格式不支持：{path.suffix}（要 jpg/png/webp/gif）"
+    size = path.stat().st_size
+    if size > _EMOTE_MAX_BYTES:
+        return None, None, f"表情「{eid}」的图太大：{size // 1024} KB（上限 8 MB）"
+    return path, hit, ""
+
+
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_emote_list(mood: str = "", query: str = "") -> str:
     """
-    在B站视频下发表评论或回复某条评论
+    看本地表情包库里有哪些表情（发评论想贴一张时，先用它挑 id）
+
+    Args:
+        mood: 只看某个情绪桶（happy / angry / sad / shy / confused / daily），留空 = 全部
+        query: 在 id / 画面描述 / 关键词里找，留空 = 不过滤
+
+    Returns:
+        表情列表（id / 情绪桶 / 画面描述）
+    """
+    cat, err = _load_meme_catalog()
+    if err:
+        return json.dumps({"ok": False, "error": err}, ensure_ascii=False)
+    mood_key = str(mood or "").strip().lower()
+    q = str(query or "").strip().lower()
+    out = []
+    for e in cat.get("emotes") or []:
+        if not isinstance(e, dict):
+            continue
+        if mood_key and str(e.get("mood", "")).lower() != mood_key:
+            continue
+        if q:
+            hay = " ".join([
+                str(e.get("id", "")),
+                str(e.get("caption", "")),
+                " ".join(str(k) for k in (e.get("keywords") or [])),
+            ]).lower()
+            if q not in hay:
+                continue
+        out.append({"id": e.get("id"), "mood": e.get("mood"), "caption": e.get("caption")})
+    return json.dumps({
+        "ok": True,
+        "dir": str(MEME_DIR),
+        "moods": cat.get("moods") or [],
+        "count": len(out),
+        "emotes": out,
+    }, ensure_ascii=False)
+
+
+@tool()
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, emote: str = "") -> str:
+    """
+    在B站视频下发表评论或回复某条评论（想贴一张本地表情就传 emote）
 
     Args:
         bvid: 视频BV号
         text: 评论/回复的文本内容
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
-    
+        emote: 要贴的表情 id（先用 bili_emote_list 挑；留空 = 只发文字）
+
     Returns:
         发表结果
     """
@@ -528,7 +626,22 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     info = await v.get_info()
     aid = info["aid"]
 
+    # ⭐ 图先找齐、验好，再发（见上面 _resolve_emote 那两条规矩）
+    emote_id = str(emote or "").strip()
+    emote_path = None
+    emote_skipped = ""
+    if emote_id:
+        emote_path, emote_entry, emote_err = _resolve_emote(emote_id)
+        if emote_err:
+            emote_path, emote_id = None, ""
+            emote_skipped = emote_err
+        else:
+            emote_id = str((emote_entry or {}).get("id") or emote_id)
+
     try:
+        kwargs = {}
+        if emote_path is not None:
+            kwargs["pic"] = Picture.from_file(str(emote_path))
         if rpid == 0:
             # 发表新评论
             result = await comment.send_comment(
@@ -536,6 +649,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 oid=aid,
                 type_=comment.CommentResourceType.VIDEO,
                 credential=cred,
+                **kwargs,
             )
         else:
             # 回复评论
@@ -549,6 +663,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 root=actual_root,
                 parent=rpid,
                 credential=cred,
+                **kwargs,
             )
 
         # ⭐ 把回执里的 rpid 带回去：判重表要靠它记「我们发过哪条」，宿主的评论复核
@@ -560,9 +675,20 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 val = result.get(key)
                 if isinstance(val, (int, str)) and str(val).strip() and str(val) != "0":
                     out[key] = val
+        if emote_id and emote_path is not None:
+            out["emote"] = emote_id                     # 真贴上去了
+        if emote_skipped:
+            out["emote_skipped"] = emote_skipped        # 图没贴上，但这张评论发出去了
         return json.dumps(out, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        out = {"success": False, "error": str(e)}
+        if emote_id and emote_path is not None:
+            # 没发出去 ⇒ 大概率跟这张图有关；如实说，让模型自己决定要不要退成纯文字重发
+            out["emote"] = emote_id
+            out["emote_failed"] = f"这条是带图发的（{emote_id}），失败可能出在图床/审核上"
+        if emote_skipped:
+            out["emote_skipped"] = emote_skipped
+        return json.dumps(out, ensure_ascii=False)
 
 
 # ========== Tool 7: 批量采集 ==========

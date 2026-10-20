@@ -267,7 +267,7 @@ window.__ModuleLoader__.load({
         try {
           const r = await jget('/update')
           if (r && r.ok && r.latest) {
-            const from = r.source === 'github' ? '（npm 上还没发上去，这个版本来自 GitHub）' : ''
+            const from = r.source === 'github' ? '（这个版本来自 GitHub）' : ''
             if (r.hasNew) {
               setNewVer(r.latest)
               say('有新版 v' + r.latest + '（你的是 v' + r.current + '）' + from + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
@@ -376,7 +376,7 @@ window.__ModuleLoader__.load({
             ? '读不到插件配置（已经试了 ' + fails + ' 次）。常见原因有三个：装的还是 0.1.11 / 0.1.12（那两版有 bug，会卡在这里）；刚装完没重启 dsh；或者插件加载失败。'
             : '读设置中…'),
           fails >= 6 ? h('div', { 'data-bd-note': '' },
-            '可以先试：升级到最新版（dsh plugin --profile web add github:c1overzz/dsh-bili-scroll）→ 重启 dsh；还不行就把 ' +
+            '可以先试：升级到最新版（dsh plugin --profile web add github:yudukongchen/dsh-bili-scroll）→ 重启 dsh；还不行就把 ' +
             '%USERPROFILE%\\.dsh\\bili-duty\\duty.log 的最后几十行发给作者。') : null)
       }
 

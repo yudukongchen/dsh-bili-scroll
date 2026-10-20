@@ -1,3 +1,36 @@
+## fork 增量 · 2026-10-21（未发版，基于上游 0.1.19）
+
+**修：「回复评论（只回楼中楼）」实际回不上 —— 白名单里缺 `bili_received_replies`（本机实测）**
+
+- 现象：`replyToComments` 开着、自己那条评论下面明明有一条直接回复，那一轮却回不上。
+  它只能拿 `bili_comments` 去**按点赞（热门序）**翻自己那条 —— 新评论 0 赞、视频 400+ 条评论
+  ⇒ 热门前几十条永远看不到 ⇒ 表现成"开关开了、也真去翻了，但永远回不上"，报告里只能写"没找到，跳过" ✗
+- 修法：`mcpWhitelist()` 在 `replyToComments` 开着时**放行 `bili_received_replies`**（只读，拿的是"回复我的"通知）；
+  `prompts/duty.md` 同步加一句指路：**别拿 `bili_comments` 去热门序里翻自己那条**。
+- 实测：改完那一轮日志 `… charter says use bili_received_replies instead. Let me call that.` → 回复发出，
+  宿主的楼中楼复核 `公开可见 · 依据：楼中楼·root=…` ✓。
+  （宿主侧 `lib/verify.mjs` 用的是 `mode=2`（最新），一直看得见；是**那一轮**拿不到这个能力。）
+
+**新功能：本地表情包库（图片评论）**
+
+- `vendor/bilibili-mcp/mcp_server.py`：新增 `MEME_DIR`（宿主 `BILI_MEME_DIR` 下发，没给就退回家里那份 `memes/`）、
+  只读工具 `bili_emote_list`（按 `mood` / `query` 挑 id）、`bili_reply(emote=…)` 贴图评论。
+  图**先在本地验好再发**（id 不在 / 图没了 / 格式不对 / 超 8MB ⇒ 当场退回纯文字，回执带 `emote_skipped`）。
+- `index.js`：`bili_emote_list` 工具、`bili_reply` 的 `emote` 参数、白名单放行、overlay 下发 `BILI_MEME_DIR`、
+  那一轮提示词里的表情指引；库目录约定 = **工作区下面的 `memes/`**（本机 `/home/ubuntu/cetacea/memes/`）。
+- `prompts/duty.md`：新增「发表情（图片评论，**默认不贴**）」一节 —— 一条评论最多一张、
+  **求助/悼念/吵架/严肃科普下面一律不贴**、拿不准就不贴；`emote_skipped` 时**不许补发**（同一视频第二条评论会被判刷屏）。
+- 实测：真发过一条图片评论（`BV1zeJR6TEhP`，387×387 / 37.75 KB，`content.pictures` 带图），确认公开可见后删掉。
+
+**发布源指向本 fork**
+
+- 「检查更新 / 一键升级」不再问 npm 与上游：只读 `yudukongchen/dsh-bili-scroll` 的 `package.json`，
+  一键升级装 `github:yudukongchen/dsh-bili-scroll`。
+  （起因：以前两条源都指上游 ⇒ 上游一发版，点「一键升级」就会把本 fork 的版本换回上游版 ✗）
+- `package.json` 的 `repository` / `homepage` / `bugs`、`client.js` 里那句升级提示，一并指向本 fork。
+
+---
+
 ## 0.1.19 — 2026-10-20
 
 **新功能：自动收藏（思路来自社区 PR #63 / `HebPRo`，判据自己实现）**

@@ -400,6 +400,21 @@ export function apply(ctx, config) {
 
   /* ─────────────── MCP（内部起那个 Python MCP） ─────────────── */
 
+  /**
+   * ⭐ 本地表情包库在哪：约定 = **工作区下面的 `memes/`**（catalog.json + 图都在那儿）。
+   *    · 工作区留空 ⇒ 没有表情库：贴图那一步会被 Python 那边跳过，评论照发纯文字
+   *    · 想放别处：改这里的约定，或给 MCP 的 env 塞 `BILI_MEME_DIR`（下面两处都用了它）
+   */
+  const memeDir = () => {
+    const ws = String(cfg.workspace || '').trim()
+    return ws ? join(ws, 'memes') : ''
+  }
+  /** 塞进 MCP env 的那份（空字符串 = 不下发，Python 退回它自己家目录里的 memes/） */
+  const memeEnv = () => {
+    const d = memeDir()
+    return d ? { BILI_MEME_DIR: d } : {}
+  }
+
   let mcp = null
   let mcpKey = ''
   const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}`
@@ -416,7 +431,7 @@ export function apply(ctx, config) {
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
       //    Windows 默认 GBK 的话，中文/emoji 一进管道就可能炸 ⇒ 钉死 UTF-8
-      env: uvEnv(),
+      env: uvEnv(memeEnv()),
       log,
     })
     return mcp
@@ -506,14 +521,34 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'bili_emote_list',
+    description: '看本地表情包库里有哪些表情（发评论想贴一张时，先用它挑 id）。\n'
+      + '传 mood（happy/angry/sad/shy/confused/daily）或 query（画面/关键词）筛一下；'
+      + '库不在就当没有 —— 别硬找。',
+    parameters: {
+      mood: { type: 'string', description: '只看某个情绪桶：happy / angry / sad / shy / confused / daily' },
+      query: { type: 'string', description: '在 id / 画面描述 / 关键词里找（例：干饭、害羞、比心）' },
+    },
+    async execute(args) {
+      return call('bili_emote_list', {
+        mood: String(args.mood ?? ''),
+        query: String(args.query ?? ''),
+      })
+    },
+  })
+
+  tool({
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
+      + '想贴一张本地表情就传 emote（id 从 bili_emote_list 拿）—— 会发成**图片评论**；'
+      + '图找不到 / 太大 / 格式不对时**自动退回纯文字**发，回执里的 emote_skipped 会说明原因。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
       + '除非本人当场让你发（那时传 force: true）。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      emote: { type: 'string', description: '要贴的表情 id（bili_emote_list 里的那一个；不填 = 只发文字）' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
@@ -532,6 +567,8 @@ export function apply(ctx, config) {
         bvid: String(args.bvid ?? ''),
         text: String(args.text ?? ''),
         rpid: Number(args.rpid) || 0,
+        // ⭐ 表情是可选的：不传 ⇒ 纯文字，跟以前一模一样 ✓
+        ...(String(args.emote ?? '').trim() ? { emote: String(args.emote).trim() } : {}),
       })
     },
   })
@@ -684,7 +721,7 @@ export function apply(ctx, config) {
   const runUpgrade = () => {
     if (upgrading) return { ok: true, busy: true, log: installLogFile, hint: '正在升级，别重复点' }
     upgrading = true
-    const spec = lastUpdateSource === 'github' ? 'github:c1overzz/dsh-bili-scroll' : 'dsh-bili-scroll'
+    const spec = 'github:yudukongchen/dsh-bili-scroll'   // ⭐ fork 版：一键升级只装自己这份
     appendInstall('\n=== ' + new Date().toISOString() + ' 开始升级（add ' + spec + '）===\n')
     ;(async () => {
       try {
@@ -890,6 +927,13 @@ export function apply(ctx, config) {
         : (cfg.dmMode === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
+      + (commentOn
+        ? (memeDir()
+          ? `⭐ 表情包库（本地）：${memeDir()} —— 发评论时想贴一张就先 \`bili_emote_list\` 挑 id，`
+            + `再给 \`bili_reply\` 传 \`emote\`（那是**图片评论**）。⚠️ **绝大多数评论别贴图**（一条评论最多一张），`
+            + `什么时候值得贴、怎么选，看章程里「发表情」那节；图有问题时它会自己退回纯文字。`
+          : `⭐ 表情包库：这一轮没有（设置里的「工作区」没填）⇒ \`emote\` 用不了，别试，纯文字评论。`)
+        : '')
       + (dmOn
         ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
@@ -936,6 +980,16 @@ export function apply(ctx, config) {
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
     if (String(cfg.dmMode || 'off') !== 'off' && Number(cfg.dmUid) > 0) list.push('bili_send_message')
+    // ⭐ 2026-10-21（本机实测踩到）：回复评论开着，却忘了给 `bili_received_replies` ⇒
+    //   那一轮手里只有 `bili_comments`，而它是**按点赞（热门序）**翻页的 ——
+    //   自己那条评论 0 赞、视频 400+ 条评论 ⇒ 热门前几十条里根本看不到自己那条 ⇒
+    //   表现成"开关开了、它也真去翻了，但永远回不上"，报告里只能写"没找到，跳过" ✗
+    //   （宿主侧的 verify.mjs 用 `mode=2`（最新）能看见，但那一轮拿不到那个能力。）
+    //   ⇒ replyToComments 开着才放这只：只读、拿的是"回复我的"通知，白名单别松 ✓
+    if (cfg.replyToComments) list.push('bili_received_replies')
+    // ⭐ 本地表情包库：`bili_emote_list` 只读家里那个 catalog.json，不发请求、不改任何东西
+    //    ⇒ 一律放行（贴图那一下走的还是 bili_reply 那道闸）
+    list.push('bili_emote_list')
     return list
   }
 
@@ -988,6 +1042,9 @@ export function apply(ctx, config) {
         `          - '${posix(script)}'`,
         '        env:',
         `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
+        // ⭐ 本地表情包库：把库目录也交给那一轮的 MCP ——
+        //    不给 = 那一轮贴不了图（评论照发纯文字），不会报错 ✓
+        ...(memeDir() ? [`          BILI_MEME_DIR: '${posix(memeDir())}'`] : []),
         '',
       )
     }
@@ -1686,23 +1743,14 @@ export function apply(ctx, config) {
         return pa ? -1 : 1   // 有预发布标签的更旧
       }
       const fresh = (c) => Boolean(c) && Date.now() - c.at < 24 * 3600 * 1000
-      // ① npm（不依赖加速器，通常最快）
-      let npmVer = ''
-      try {
-        if (fresh(updateCache)) npmVer = updateCache.latest
-        else {
-          const r = await fetch('https://registry.npmjs.org/dsh-bili-scroll/latest', { signal: AbortSignal.timeout(8000) })
-          const j = await r.json()
-          npmVer = String(j.version || '')
-          updateCache = { at: Date.now(), latest: npmVer }
-        }
-      } catch (e) { log('查 npm 版本没成功（接着查 GitHub）：' + (e?.message ?? e)) }
-      // ② GitHub（要加速器；不通就安静跳过，别打扰用户）
+      // ⭐ 2026-10-21：本 fork **只认自己的发布源** —— 检查更新就读自己 fork 里 package.json 的 version。
+      //   以前这里还会问 npm 上的 `dsh-bili-scroll`（那是上游的包）⇒ 上游一发版，
+      //   用户点「一键升级」就会把本 fork 的版本换回上游版 ✗ ⇒ 现在两条都指向 yudukongchen。
       let ghVer = ''
       try {
         if (fresh(ghUpdateCache)) ghVer = ghUpdateCache.latest
         else {
-          const r = await fetch('https://api.github.com/repos/c1overzz/dsh-bili-scroll/contents/package.json', {
+          const r = await fetch('https://api.github.com/repos/yudukongchen/dsh-bili-scroll/contents/package.json', {
             signal: AbortSignal.timeout(6000),
             headers: { 'user-agent': 'dsh-bili-scroll', accept: 'application/vnd.github+json' },
           })
@@ -1713,14 +1761,13 @@ export function apply(ctx, config) {
             ghUpdateCache = { at: Date.now(), latest: ghVer }
           }
         }
-      } catch { /* 没有加速器时这里基本都失败 —— 静默，别打扰 */ }
-      // 谁新用谁；一样新时优先 npm（装起来快）
-      if (ghVer && (!npmVer || cmp(ghVer, npmVer) > 0)) { out.latest = ghVer; out.source = 'github' }
-      else out.latest = npmVer || ghVer
-      if (out.source === 'github') out.page = 'https://github.com/c1overzz/dsh-bili-scroll'
+      } catch { /* 网络不通就安静跳过，别打扰用户 */ }
+      out.latest = ghVer
+      out.source = 'github'
+      out.page = 'https://github.com/yudukongchen/dsh-bili-scroll'
       out.hasNew = Boolean(out.latest) && cmp(out.latest, out.current) > 0
       lastUpdateSource = out.source
-      if (!out.latest) { out.ok = false; out.error = '两条源都没查到版本号（网络可能不通）' }
+      if (!out.latest) { out.ok = false; out.error = '没查到版本号（网络可能不通）' }
       return sendJson(res, 200, out)
     }
 
