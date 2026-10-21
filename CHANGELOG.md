@@ -1,3 +1,13 @@
+**修（⚠️ 阻断级）：overlay 无条件"跟随宿主模型"会让每一轮开头就死**
+
+- 症状：任何一轮都 `dsh: NO_ADAPTER: no adapter registered for provider "agent2api"` → `code=1`，什么都没干。
+- 根因：0.1.18 加的"overlay 里补 `agent-default-model`、优先跟随用户当前选的模型"，
+  对**自定义 provider** 是错的 —— `agent2api` 那套 provider 配置（apiKeyEnv / baseURL / models）
+  只写在 **web profile 那层 patch** 里，一次性 overlay 把它塞给 **headless** ⇒ headless 没有那个 adapter ✗。
+- 修法：**只跟随内置 `deepseek-*` 路由**（也就是那三个账号服务能解析的）；自定义 provider 一律不写
+  （headless 退回自己的默认模型，配着 credentials/authorization/deepseek-account 三个服务照样能跑），
+  并在 `duty.log` 里说明为什么没写。要硬指定就设 `overlayModel = "provider/model"`（新配置项）。
+
 ## fork 增量 · 2026-10-21（第二轮：主人提的 A/B 两段式 + 三个固定时段）
 
 **改：每轮评论数固定 1、配置项隐藏**

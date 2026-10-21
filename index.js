@@ -82,6 +82,9 @@ export const Config = !z ? undefined : z.object({
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
   workspace: z.string().default('').extra('volatile', true),
+  /** ⭐ 那一轮用哪个模型 `provider/model`（留空 = 只跟随内置 deepseek 路由；
+   *  ⚠️ 填自定义 provider 前先确认 headless profile 也能解析它，否则会 NO_ADAPTER） */
+  overlayModel: z.string().default('').extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
@@ -199,7 +202,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, morning: false, noon: true, evening: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', overlayModel: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -1059,20 +1062,34 @@ export function apply(ctx, config) {
     //    因为 headless 的 `agent-default-model` 默认解析到 `deepseek-official`（要 API key），
     //    而"账号登录"的机器没有 key；桌面版是靠 profile 那层 patch 把路由指到 deepseek-account 的，
     //    **我们这一轮的一次性 overlay 没有那一层** ⇒ 还没发请求就死了。
-    //    ⇒ overlay 里补一条 agent-default-model，**优先跟随用户当前选的模型**；拿不到就不写（保持原行为）✓
+    //    ⇒ overlay 里补一条 agent-default-model ✓
+    // ⭐⭐ 2026-10-21（本机实测，踩到了 0.1.18 这个改动的反作用）：
+    //    **不能无条件"跟随宿主当前模型"** —— 像 `agent2api` 这种**自定义 provider**，
+    //    它的 provider 配置（apiKeyEnv / baseURL / models）只写在 **web profile 那层 patch** 里，
+    //    一次性 overlay 把它塞给 headless ⇒ `NO_ADAPTER: no adapter registered for provider "agent2api"`
+    //    ⇒ **每一轮开头就死**（code=1，什么都没干）✗。
+    //    ⇒ 规则：**只跟随内置的 deepseek 路由**（`deepseek-*`，也就是那三个账号服务能解析的那些）；
+    //      自定义 provider 一律不写 —— headless 退回它自己的默认模型，配着上面
+    //      credentials/authorization/deepseek-account 三个服务，账号登录的机器照样能跑 ✓。
+    //      要硬指定就设 `overlayModel = "provider/model"`（例如 `deepseek-account/deepseek-flash`）。
+    const knownRoute = (p) => /^deepseek/i.test(String(p || ''))
     try {
+      const forced = String(cfg.overlayModel || '').trim()
       const sel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
-      const selProvider = sel?.provider ?? sel?.providerId
-      const selModel = sel?.model ?? sel?.modelId
-      if (selProvider && selModel) {
+      const selProvider = forced ? forced.split('/')[0] : (sel?.provider ?? sel?.providerId)
+      const selModel = forced ? forced.split('/').slice(1).join('/') : (sel?.model ?? sel?.modelId)
+      if (selProvider && selModel && (forced || knownRoute(selProvider))) {
         yml.push(
           '- id: agent-default-model',
           '  config:',
           '    provider: ' + String(selProvider),
           '    model: ' + String(selModel),
-          ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
+          ...(!forced && sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
           '',
         )
+      } else if (selProvider) {
+        log(`overlay 不写 agent-default-model：宿主 provider=${selProvider} 不是内置 deepseek 路由`
+          + `（headless 那边没有这个 adapter，写了会 NO_ADAPTER）⇒ 这一轮用 headless 自己的默认模型`)
       }
     } catch { /* 老版本没有这个服务 —— 不写就退回原行为 */ }
     if (cfg.overlayMcp) {
