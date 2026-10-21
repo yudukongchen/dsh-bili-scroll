@@ -156,6 +156,10 @@ window.__ModuleLoader__.load({
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
+      const [dmWatch, setDmWatch] = React.useState(null)    // 私信监听（能收能回）
+      const [dmMins, setDmMins] = React.useState(null)      // 轮询间隔（分钟）
+      const [dmPerDay, setDmPerDay] = React.useState(null)  // 每天最多回几条（0=只读不回）
+      const [dmOwner, setDmOwner] = React.useState(null)    // 私信回给谁的 UID（0=按「@ 谁」查）
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -181,6 +185,10 @@ window.__ModuleLoader__.load({
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && dmWatch === null) setDmWatch(Boolean(cfg.dmWatch))
+        if (cfg && dmMins === null) setDmMins(String(cfg.dmWatchMinutes ?? 1))
+        if (cfg && dmPerDay === null) setDmPerDay(String(cfg.dmReplyPerDay ?? 0))
+        if (cfg && dmOwner === null) setDmOwner(String(cfg.dmOwnerUid ?? 0))
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
 
@@ -493,6 +501,44 @@ window.__ModuleLoader__.load({
             }),
             h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
             h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
+          /* ── 私信双向（2026-10-22 从上游 2.0 并进来）── */
+          h(ToggleRow, {
+            label: '私信监听（能收能回）',
+            note: '开了之后宿主每分钟**纯代码**看一次私信（这一步不花 token）；只有你本人发来新消息、'
+              + '而且下面「每天最多回几条」不是 0 时，才会花 token 回一句。陌生人发来的一律不回',
+            on: Boolean(dmWatch),
+            onChange: (v) => { setDmWatch(v); patch({ dmWatch: v }, '私信监听') },
+          }),
+          dmWatch ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '多久查一次（分钟）'),
+                h('div', { 'data-bd-note': '' }, '最小 1 分钟；只读私信、纯代码，不花 token')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 60, value: dmMins ?? '',
+                onChange: (e) => setDmMins(e.target.value),
+                onBlur: () => { const n = Math.max(1, Math.min(Number(dmMins) || 1, 60)); setDmMins(String(n)); patch({ dmWatchMinutes: n }, '私信轮询间隔') },
+              })),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每天最多回几条'),
+                h('div', { 'data-bd-note': '' }, '**0 = 只读不回**（只监听、一分钱不花）；填 1~50 才是真回')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50, value: dmPerDay ?? '',
+                onChange: (e) => setDmPerDay(e.target.value),
+                onBlur: () => { const n = Math.max(0, Math.min(Number(dmPerDay) || 0, 50)); setDmPerDay(String(n)); patch({ dmReplyPerDay: n }, '每天最多回几条私信') },
+              })),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '私信回给谁的 UID'),
+                h('div', { 'data-bd-note': '' }, '留空 / 0 = 用上面「要 @ 谁」的昵称查一次（结果会缓存）')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: dmOwner ?? '',
+                placeholder: '0 = 自动查',
+                onChange: (e) => setDmOwner(e.target.value),
+                onBlur: () => { const n = Math.max(0, Number(dmOwner) || 0); setDmOwner(String(n)); patch({ dmOwnerUid: n }, '私信回给谁') },
+              })),
+            h('div', { 'data-bd-note': '' }, '⚠️ 只在「你本人」那个号发来的私信上回；回复内容 100 字以内、像聊天（私信里带视频 BV 号的话，它还会先读字幕再答）')) : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
