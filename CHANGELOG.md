@@ -29,6 +29,22 @@
   （起因：以前两条源都指上游 ⇒ 上游一发版，点「一键升级」就会把本 fork 的版本换回上游版 ✗）
 - `package.json` 的 `repository` / `homepage` / `bugs`、`client.js` 里那句升级提示，一并指向本 fork。
 
+**修：本地转写拉流被 B站 回 412 + 同一视频重跑撞 416（本机实测）**
+
+- **412**：`yt-dlp` 拉流**没带登录态** ⇒ B站 直接拒，没字幕的视频全废（报告里只能写"本地转写被 412 拒"）。
+  现在 `lib/asr.py` 会把插件家那份 `bili_credential.json` 变成 yt-dlp 认的 `cookiefile`
+  （写到插件家的 `tmp/asr/yt-dlp-cookies.txt`，权限 0600），并把 UA 换成正常的桌面 UA；
+  **拿不到凭证就照旧**（不发 cookie，行为跟以前一模一样）。
+- **416**：同一个 BV 重跑（或一轮里重试）时，上次剩下的音频会被 yt-dlp 当成"续传起点"、
+  发 Range 请求而文件已下完 ⇒ `HTTP 416: Requested Range Not Satisfiable` 整条挂掉 ✗。
+  现在下载前**清掉同名残留**，并明确 `continuedl: False` + `overwrites: True`。
+- 实测：本机那条被 412 拒的 `BV1fpnw6oE3Q`，修完能下下来并转写出文字。
+
+**顺手**：两个测试脚本从临时补丁目录挪进仓库 ——
+`tools/emote-selftest.py`（只读自检：白名单 + 库能不能读 + 筛得动）、
+`tools/emote-e2e.py`（真要发一条图片评论再删掉的烟测，默认不干，得显式 `--post`）。
+其余补丁脚本（重打器 / 载荷）已完成使命、删掉了。
+
 ---
 
 ## 0.1.19 — 2026-10-20
