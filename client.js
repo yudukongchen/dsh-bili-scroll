@@ -19,7 +19,7 @@
  *   ⇒ **别自己糊一个标题栏按钮 + 全屏 overlay** ✗（第一版就是这么干的，使用者一眼看出"跟别的插件不一样"）。
  *
  * 这一页要满足使用者 2026-10-14 说的形状：
- *   · **总开关 → 打开之后下面才展开子开关**（峰谷自动刷 → 中午 / 晚上）
+ *   · **总开关 → 打开之后下面才展开子开关**（按时段自动刷 → 早间 / 中午 / 晚间）
  *   · **数字项要能自己填**（定量刷：每天几条）
  *   · **账号绑定必须在设置页里**（扫码登录 + 二维码直接显示在页里）
  *   · 会发东西出去的（自动评论）、要下大模型的（本地转写）**默认关**
@@ -89,10 +89,11 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 `
 
-    // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
+    // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致：三个**固定时段**（不再区分工作日/峰谷）
     const DEFAULT_WINDOWS = {
-      noon: { label: '中午谷时', start: '12:00', end: '14:00' },
-      night: { label: '晚上/夜间谷时', start: '18:00', end: '09:00' },
+      morning: { label: '早间（07:00–09:00）', start: '07:00', end: '09:00' },
+      noon: { label: '中午（12:00–14:00）', start: '12:00', end: '14:00' },
+      evening: { label: '晚间（18:00–23:00）', start: '18:00', end: '23:00' },
     }
 
     /* ────────────── 小组件 ────────────── */
@@ -152,7 +153,6 @@ window.__ModuleLoader__.load({
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
-      const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
@@ -177,7 +177,6 @@ window.__ModuleLoader__.load({
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
-        if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
@@ -408,13 +407,14 @@ window.__ModuleLoader__.load({
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
-            label: '峰谷时段自动刷',
-            note: '只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑',
+            label: '按时段自动刷',
+            note: '三个固定时段：早间 07:00–09:00（默认关）· 中午 12:00–14:00 · 晚间 18:00–23:00；'
+              + '每个时段先跑一轮「任务 A」（挑 + @ 你 1 条），再按还没 @ 的条数补跑「任务 B」（每轮补 @ 1 条，间隔 5 分钟，最少 1 轮）；关了就只能手动跑',
             on: sw('peakValley'),
-            onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
+            onChange: (v) => patch({ peakValley: v }, '按时段自动刷'),
           }),
           sw('peakValley') ? h('div', { 'data-bd-sub': '' },
-            ...['noon', 'night'].map((k) => h(ToggleRow, {
+            ...['morning', 'noon', 'evening'].map((k) => h(ToggleRow, {
               key: k,
               label: win[k].label,
               note: `${win[k].start} – ${win[k].end}`,
@@ -464,17 +464,9 @@ window.__ModuleLoader__.load({
             onChange: (v) => patch({ autoComment: v }, '自动评论'),
           }),
           sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；填 0 = 这一轮不发评论')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
-              })),
+            h('div', { 'data-bd-label': '' }, '每轮固定发 1 条评论'),
+            h('div', { 'data-bd-note': '' }, '（这个数字已经**固定为 1**、不再可配 —— 每条评论里 @ 一次下面那个人；'
+              + '挑中但没 @ 完的，由「任务 B」在同一个时段里每隔 5 分钟补 @ 一个）'),
             h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
             h('input', {
               'data-bd-input': '', value: mention ?? '',

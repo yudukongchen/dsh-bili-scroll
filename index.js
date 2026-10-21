@@ -47,11 +47,13 @@ export const inject = ['webServer', 'tools', 'settings']
 export const Config = !z ? undefined : z.object({
   /** 定量刷：每天最多挑几条 */
   perDay: z.natural().default(5).extra('volatile', true),
-  /** 峰谷自动刷（总开关） */
+  /** 按时段自动刷（总开关；字段名沿用 peakValley，语义已改成"三个固定时段"） */
   peakValley: z.boolean().default(false).extra('volatile', true),
-  /** 峰谷子开关：中午 / 晚上 */
+  /** ⭐ 三个固定时段（2026-10-21 改）：早间 07:00–09:00（**默认关**）/ 中午 12:00–14:00 / 晚间 18:00–23:00
+   *  —— 不再区分工作日与峰谷；原名 `night`（18:00–09:00 跨夜）已改名 `evening`，见下面 loadCfg 的迁移 */
+  morning: z.boolean().default(false).extra('volatile', true),
   noon: z.boolean().default(true).extra('volatile', true),
-  night: z.boolean().default(true).extra('volatile', true),
+  evening: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
@@ -195,7 +197,7 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, morning: false, noon: true, evening: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
@@ -209,6 +211,11 @@ export function apply(ctx, config) {
       else if (typeof base[k] === 'boolean') { if (typeof v === 'boolean') out[k] = v }
       else if (typeof base[k] === 'string') { if (typeof v === 'string') out[k] = v }
     }
+    // ⭐ 2026-10-21 迁移：老的 `night`（18:00–09:00 跨夜）改名叫 `evening`（18:00–23:00）
+    //    老用户的 night 值要带过来；否则他明明开着"晚上刷"，升级后会静默变成默认值 ✗
+    if (out.evening === base.evening && src && typeof src.night === 'boolean' && src.evening === undefined) out.evening = src.night
+    // ⭐ 「自动评论每轮最多几条」已固定为 1（配置项隐藏）—— 读进来一律按 1 走
+    out.commentPerRound = 1
     return out
   }
   /* ── 配置从哪来：DSH 自带的「插件设置」页 > 插件自己的 config.json > 默认值 ──
@@ -231,7 +238,10 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('favFolderId' in p) p.favFolderId = Math.max(0, Math.floor(Number(p.favFolderId) || 0))
-    if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 2026-10-21：「每轮最多发几条评论」**固定 1、配置项隐藏** —— 写什么进来都按 1 算
+    //    （老客户端/老原生设置页还可能提交这个键，一律忽略，别让它把口径改回去 ✗）
+    if ('commentPerRound' in p) p.commentPerRound = 1
+    if ('night' in p) { p.evening = Boolean(p.night); delete p.night }   // 老键迁移
     return p
   }
 
@@ -609,9 +619,16 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_run',
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
-      + '适合"我现在就想看一份"的场合。',
-    parameters: {},
-    async execute() { const r = runDuty('manual'); return { ok: true, ...r } },
+      + '适合"我现在就想看一份"的场合。\n'
+      + '⭐ mode 选 "B" 就是**任务 B（补 @）**：不挑新视频，只把「今天挑中但还没 @ 的」补 @ 一个 + 回复评论。',
+    parameters: {
+      mode: { type: 'string', description: 'A（默认，原版挑一轮）/ B（补 @ 一轮）' },
+    },
+    async execute(args) {
+      const mode = String(args?.mode ?? '').toUpperCase() === 'B' ? 'B' : 'A'
+      const r = runDuty(mode === 'B' ? 'manual:B' : 'manual', mode)
+      return { ok: true, mode, ...r }
+    },
   })
 
   tool({
@@ -657,7 +674,7 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
+      + '例：`{"perDay":5,"peakValley":true,"morning":false,"noon":true,"evening":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
       + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
@@ -852,7 +869,7 @@ export function apply(ctx, config) {
     return { command: 'dsh', args: [], shell: true, fallback: true, hint }
   }
 
-  const promptFor = () => {
+  const promptFor = (mode = 'A') => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-19（issue #36）：这里以前是**在路径字符串上**做 split('<家目录>') —— 空操作 ✗
@@ -890,6 +907,35 @@ export function apply(ctx, config) {
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
     const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    // ⭐ 任务 B（2026-10-21 新增）：不挑新视频，只从"挑中但还没 @ 的"里补 @ 一个 + 回复评论
+    if (mode === 'B') {
+      const pending = pendingPicks()
+      const nReply = Math.max(1, Number(cfg.replyPerRound) || 1)
+      const seenPath = join(stateDir, 'seen.md')
+      return `你是这个账号的 B站 助手。`
+        + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
+        + ownerDoc
+        + (ownerDoc ? '' : '⭐ 这一轮**没有**拿到使用者的设定 ⇒ **按中性说话**，别自己编一套人格 ✓。')
+        + `然后读章程 ${duty}。⭐⭐ 这一轮**只做任务 B（补 @）**：`
+        + `\n⭐ **待 @ 列表**（今天挑中、但还没 @ 过主人的）：${pending.length ? pending.join('、') : '（空）'}。`
+        + (pending.length
+          ? `\n- 从里面**挑一个**（最值得占用主人一次注意力的），用 \`bili_reply\` 在它下面发**一条**评论：`
+            + `正文里**纯文本 @ ${cfg.mentionName}**、≤150 字、短干净像人话。`
+            + `（想贴一张本地表情就按章程「发表情」那节的规矩来，**默认不贴**。）`
+          : `\n- 这一轮**没有待 @ 的** ⇒ **不要发任何新评论**，只做下面的回复评论。`)
+        + `\n🔴🔴 **不要写 \`### BV号\` 这种标题行，也不要挑新视频**（今天额度早就满了；宿主拿 \`### BV\` 数配额，`
+        + `B 轮写了会吃掉主人今天的额度 ✗）；B 轮**没有看新视频**，所以归档不用动。`
+        + `\n- 发完把「BV 号 + rpid + 时间 + 正文前 20 字」记进判重表（${seenPath}）；`
+        + `报告只**追加一行**：\`任务B：在 BV… 补 @ 了（rpid …）\`（没发就写"这一轮没有待 @ 的"）。`
+        + (commentOn
+          ? ''
+          : `\n⚠️ 但「自动评论并 @ 你」现在是**关着**的 ⇒ **一条评论都别发**，只做回复评论（下面那条照讲究）。`)
+        + `\n- 回复评论：${cfg.replyToComments
+          ? `开着（每轮最多回 ${nReply} 条）—— 只回「**直接回复到我们那条评论下面**的人」，回完记进报告；找不到我们那条评论就跳过，别硬找。`
+          : '关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。'}`
+        + `\n- 这一轮**不用**本地转写（没看新视频），也别去搜关键词。`
+        + `\n最后用一句话汇报你补 @ 了谁。现在几点了自己看一眼系统时间。`
+    }
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -923,7 +969,7 @@ export function apply(ctx, config) {
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
+        ? `开着的（每轮**固定 1 条**评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
         : (cfg.dmMode === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
@@ -1107,7 +1153,69 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
-  const runDuty = (why = 'window') => {
+  /* ─────────────── 时段调度器（2026-10-21 新增）───────────────
+   * 需求（主人 2026-10-21）：三个确定时段 · 每时段"先 A 后 B"· B 轮数 = max(待 @ 条数, 1)
+   *   · 轮间隔 5 分钟、单轮 ≤ 20 分钟 · 额度全天共用 · 窗口剩不到 20 分钟就不起新轮
+   * 状态落在 state.json：`auto = { day, windows: { <时段>: { aRan, bDone, nextAt } } }`
+   */
+  const B_GAP_MS = Math.max(10, Number(process.env.BILI_DUTY_B_GAP_SEC || 300)) * 1000            // 轮间隔（默认 5 分钟）
+  const ROUND_MAX_MS = Math.max(30, Number(process.env.BILI_DUTY_ROUND_MAX_SEC || 1200)) * 1000   // 单轮上限（默认 20 分钟）
+  let runningRound = null      // { mode, why, win, pid, killed } | null —— 同一时刻只允许一轮
+  let roundKillTimer = null
+
+  /** 自动调度的状态（只认今天） */
+  const autoState = () => {
+    const a = readJson(dutyStateFile, {}).auto
+    return a && a.day === dayKey() ? { ...(a.windows || {}) } : {}
+  }
+  const saveAuto = (windows) => bumpState({ auto: { day: dayKey(), windows } })
+
+  /** 「挑中但还没 @ 过」的视频（报告里的 `### BV` 减去判重表「评论记录」里已 @ 的那些） */
+  const pendingPicks = () => {
+    try {
+      const text = readFileSync(reportFileOf(), 'utf8').replace(/```[\s\S]*?```/g, '')
+      const picked = [...new Set([...text.matchAll(PICK_RE)].map((m) => m[1]))]
+      const seen = readFileSync(join(stateDir, 'seen.md'), 'utf8')
+      const commented = new Set()
+      for (const line of seen.split(/\r?\n/)) {
+        const bv = /BV[0-9A-Za-z]{10}/.exec(line)
+        if (!bv) continue
+        if (!/\b\d{9,}\b/.test(line)) continue      // 同一行还要有 rpid，才算"我们评论过这条"
+        commented.add(bv[0])
+      }
+      return picked.filter((bv) => !commented.has(bv))
+    } catch { return [] }
+  }
+
+  /** 距这个窗口结束还有多少毫秒（跨夜也算得对） */
+  const windowLeftMs = (now, win) => {
+    const [h, m] = String(win.end).split(':').map(Number)
+    const end = new Date(now)
+    end.setHours(h, m, 0, 0)
+    if (end <= now) end.setDate(end.getDate() + 1)
+    return end - now
+  }
+
+  /** 杀掉一棵进程树（超时用）：POSIX 靠进程组（负 pid），Windows 靠 taskkill /T */
+  const killTree = (pid) => {
+    if (!pid) return
+    try {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      } else {
+        try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* 已经没了 */ } }
+      }
+    } catch (e) { log(`杀进程树失败：${e?.message ?? e}`) }
+  }
+
+  /**
+   * 跑一轮。mode：
+   *   · 'A' —— 原版任务：搜、挑（最多到当天额度）、**发 1 条评论 @ 主人**、写报告
+   *   · 'B' —— 任务 B：**不挑新视频**，从"挑中但还没 @ 的"里挑 **1 个**补 @，外加【回复评论 n 条】
+   * win：由调度器传进来的时段名（'morning' / 'noon' / 'evening'）；手动跑为空。
+   * ⚠️ 同一时刻只允许一轮（`runningRound` 闸），由调度器维护。
+   */
+  const runDuty = (why = 'window', mode = 'A', win = '') => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
     const dsh = resolveDsh()
@@ -1121,25 +1229,38 @@ export function apply(ctx, config) {
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+    args.push(promptFor(mode))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
     //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
     //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
     const cwd = stateDir
-    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
+    log(`刷B站开跑（${why}，任务${mode}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     const child = spawn(dsh.command, args, {
       cwd,
       shell: dsh.shell,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // ⭐ detached（POSIX）：让这一轮**自成进程组** —— 20 分钟超时要杀就杀**整棵树**
+      //    （dsh 自己还会拉 MCP 子进程；只杀父进程会留下孤儿 python ✗）
+      detached: process.platform !== 'win32',
       // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
       // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
       //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
       env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
     })
+    // ⭐⭐ 2026-10-21（主人需求 5）：**单轮最长 20 分钟**，到点连整棵进程树一起杀
+    runningRound = { mode, why, win, pid: child.pid, startedAt: Date.now(), killed: false }
+    roundKillTimer = setTimeout(() => {
+      try {
+        runningRound && (runningRound.killed = true)
+        log(`⚠️ 这一轮超过 ${Math.round(ROUND_MAX_MS / 60000)} 分钟（任务${mode}）⇒ 终止整棵进程树`)
+        killTree(child.pid)
+      } catch (e) { log(`超时终止出错（已兜住）：${e?.message ?? e}`) }
+    }, ROUND_MAX_MS)
+    roundKillTimer.unref?.()
     // ⚠️ 2026-10-16 issue #1（用户 `miaoxingyunduo` 贴了崩溃日志）：`duty.log` 被别的进程占着时
     //    (`EBUSY`) `appendFileSync` 会抛异常 —— 而这里是 **stream 的 data 回调**，没人接
     //    ⇒ **未捕获异常 ⇒ 整个 DSH 宿主被杀**（所有会话一起没）。跟 10-14 定时器那次是同一类 ✗
@@ -1161,12 +1282,27 @@ export function apply(ctx, config) {
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
-      log(`刷B站结束（${why}，code=${code}）`)
+      const wasKilled = Boolean(runningRound?.killed)
+      log(`刷B站结束（${why}，任务${mode}，code=${code}${wasKilled ? '，**超时被杀**' : ''}）`)
+      if (roundKillTimer) { clearTimeout(roundKillTimer); roundKillTimer = null }
+      runningRound = null
+      // ⭐ 调度器交账：这一轮是谁的、下一轮什么时候能起（轮间隔）
+      if (win) {
+        try {
+          const w = autoState()
+          const phase = w[win] || { aRan: false, bDone: 0 }
+          const next = { ...phase, nextAt: new Date(Date.now() + B_GAP_MS).toISOString() }
+          if (mode === 'A') next.aRan = true
+          else next.bDone = Number(phase.bDone || 0) + 1
+          saveAuto({ ...w, [win]: next })
+          log(`调度：${win} 的${mode}轮结束（bDone=${next.bDone}），下一轮最早 ${new Date(next.nextAt).toLocaleTimeString('zh-CN', { hour12: false })}`)
+        } catch (e) { log(`调度交账出错（已兜住）：${e?.message ?? e}`) }
+      }
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
-    // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
-    if (code === 0 && Number(cfg.favFolderId) > 0) {
-      favToday('auto').catch((error) => log('自动收藏出错（已兜住）：' + String(error?.message ?? error)))
-    }
+      // ⭐ 自动收藏**只在任务 A 轮**做：B 轮不挑新视频，跟着跑只是白调 API（幂等但没意义）
+      if (code === 0 && mode === 'A' && Number(cfg.favFolderId) > 0) {
+        favToday('auto').catch((error) => log('自动收藏出错（已兜住）：' + String(error?.message ?? error)))
+      }
       rotateLogIfBig()            // ⭐ 日志别无声地长（三天 797KB ⇒ 一年约 100MB）
       // ⭐ 这一轮挑了几条：从今天的报告里数（上一轮挑的还在同一份文件里 ⇒ 数出来就是全天的账）
       try {
@@ -1198,22 +1334,46 @@ export function apply(ctx, config) {
   const tick = () => {
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
-      if (!cfg.peakValley) return
+      if (!cfg.peakValley) return     // 总开关（字段名沿用 peakValley）
+      if (runningRound) return        // 上一轮还没跑完 ⇒ 什么都不排（单轮 ≤ 20 分钟由 kill 定时器兜）
       const now = new Date()
-      const st = readJson(dutyStateFile, {})
-      const today = dayKey(now)
-      // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
-      if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
-      // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
-      if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
-      for (const k of ['noon', 'night']) {
-        if (!cfg[k]) continue
-        if (!inWindow(now, WINDOWS[k])) continue
-        const key = `${today}:${k}`
-        if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
-        return
+      const W = autoState()
+      const quota = Number(cfg.perDay || 0)
+      const left = Math.max(0, quota - countPickedToday(now))    // 额度**全天共用**（不是每时段各一份）
+      const gap = B_GAP_MS
+      for (const k of Object.keys(WINDOWS)) {
+        if (!cfg[k]) continue                       // 这个时段没开
+        const win = WINDOWS[k]
+        if (!inWindow(now, win)) continue
+        const phase = W[k] || {}
+        // ⭐ 窗口剩不到一轮的上限就不起新轮（免得跨窗口、占着下一个时段）
+        if (windowLeftMs(now, win) < ROUND_MAX_MS) {
+          if (!phase.tooLate) { saveAuto({ ...W, [k]: { ...phase, toooLate: true } }); log(`调度：${k} 剩下的时间不够一轮（<${Math.round(ROUND_MAX_MS / 60000)} 分钟）⇒ 本时段不再起新轮`) }
+          continue
+        }
+        if (phase.nextAt && now.getTime() < Date.parse(phase.nextAt)) continue   // 轮间隔没到
+        // ① 任务 A：还没跑过、而且额度还有 ⇒ 跑 A；额度满了 ⇒ 记成"跳过"，直接进 B 队列
+        if (!phase.aRan) {
+          if (left > 0) {
+            saveAuto({ ...W, [k]: { ...phase, nextAt: new Date(Date.now() + ROUND_MAX_MS + gap).toISOString() } })
+            bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: `${k}:A` })
+            runDuty(`window:${k}:A`, 'A', k)
+            return
+          }
+          saveAuto({ ...W, [k]: { ...phase, aRan: true, aSkipped: true, nextAt: new Date().toISOString() } })
+          log(`调度：${k} 的额度已经用完（今天 ${countPickedToday(now)}/${quota}）⇒ 跳过任务 A，直接进 B 队列`)
+          continue
+        }
+        // ② 任务 B：轮数 = max(待 @ 条数, 1)（每轮重算 —— 这是主人定的口径）
+        const pending = pendingPicks()
+        const target = Math.max(pending.length, 1)
+        if (Number(phase.bDone || 0) < target) {
+          saveAuto({ ...W, [k]: { ...phase, nextAt: new Date(Date.now() + ROUND_MAX_MS + gap).toISOString() } })
+          bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: `${k}:B` })
+          log(`调度：${k} 起任务 B（待 @ ${pending.length} 条，已补 ${phase.bDone || 0}/${target}）`)
+          runDuty(`window:${k}:B`, 'B', k)
+          return
+        }
       }
     } catch (e) {
       log(`定时器这一跳出错（已兜住，不影响宿主）：${e?.stack ?? e}`)
@@ -1640,7 +1800,7 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+      for (const k of ['perDay', 'peakValley', 'morning', 'noon', 'evening', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
@@ -1655,7 +1815,9 @@ export function apply(ctx, config) {
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
-      return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+      const body = await readBody(req).catch(() => ({}))
+      const mode = String(body?.mode || 'A').toUpperCase() === 'B' ? 'B' : 'A'
+      return sendJson(res, 200, { ok: true, mode, ...runDuty(mode === 'B' ? 'manual:B' : 'manual', mode) })
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）
@@ -1813,5 +1975,7 @@ export function apply(ctx, config) {
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')
-  log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
+  log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，按时段自动刷=${cfg.peakValley ? '开' : '关'}`
+    + `，时段=${['morning', 'noon', 'evening'].filter((k) => cfg[k]).join('/') || '（全关）'}`
+    + `，每轮评论固定 1 条）`)
 }
