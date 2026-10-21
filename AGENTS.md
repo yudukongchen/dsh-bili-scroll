@@ -44,7 +44,7 @@
 
 - `index.js` —— host 半端：12 个工具（含 `bili_emote_list` 本地表情包库） + **时段调度器（A/B 队列状态机）** + HTTP 接口 + 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 值班轮的工具白名单（`mcpWhitelist` → `BILI_MCP_TOOLS`）
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
-- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
+- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`dm.mjs` + `uid.mjs`（私信双向：读会话/读消息、昵称查 UID）** / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
@@ -53,5 +53,8 @@
 
 - 配置与运行数据都在用户的 `$DSH_HOME/bili-duty/`，**不写进插件包目录**
 - 时段是**三个固定窗口**：早间 07:00–09:00（默认关）/ 中午 12:00–14:00 / 晚间 18:00–23:00（见 `lib/state.mjs` 的 `WINDOWS`）
+- **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
+  （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
+  回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）
 - **一轮 = 任务 A 或任务 B**：A 搜+挑+发 1 条评论写报告；B 从「挑中但还没 @ 的」里补 @ 一个 +
   回复评论（每时段 A 完再跑 max(待@数,1) 轮 B，轮间隔 5 分钟、单轮 ≤20 分钟）
