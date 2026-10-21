@@ -38,7 +38,22 @@
 - **416**：同一个 BV 重跑（或一轮里重试）时，上次剩下的音频会被 yt-dlp 当成"续传起点"、
   发 Range 请求而文件已下完 ⇒ `HTTP 416: Requested Range Not Satisfiable` 整条挂掉 ✗。
   现在下载前**清掉同名残留**，并明确 `continuedl: False` + `overwrites: True`。
-- 实测：本机那条被 412 拒的 `BV1fpnw6oE3Q`，修完能下下来并转写出文字。
+- 实测：本机那条被 412 拒的 `BV1fpnw6oE3Q` 现在**能下下来**（转写为空 ⇒ 那条本来就没语音，
+  按章程「无语音」跳过）；有讲解的 `BV1zeJR6TEHp` 前 60 秒转出 **302 字** ✓。
+  （⚠️ 别为"出点字"去关 `vad_filter`：那条纯音乐音频关掉 VAD 会吐「字幕製作人Zither Harp」这种幻觉。）
+
+**修：「补收藏今天的」一条都进不去 —— `favops.py` 是照不存在的 API 写的（本机实测）**
+
+- 症状：点一下回「收藏好了：0/3 条（失败 3 条）」，明细是 `name 'favorite_list' is not defined`。
+- 根因（0.1.19 实测）：`lib/favops.py` 的 `add()` 里 ——
+  ① 用的 `favorite_list.FavoriteListResource` 这个类**库里根本没有**；
+  ② 连 `favorite_list` 都没 import（只有同文件的 `folders()` 里 import 了）；
+  ③ `favorite_list.FavoriteList` 只有 `get_info` / `get_content`（**只读**），没有 `add`；
+  ④ 这个库的端点表里压根**没有**"把视频加进收藏夹"的端点（只有 move / copy / rm / clean）。
+- 修法：走官方那个端点的原始 spec —— POST `/x/v3/fav/resource/deal`
+  （`rid`=aid、`type`=2 视频、`add_media_ids`=目标收藏夹、`del_media_ids` 留空），
+  用库自己的 `Api` 发（`verify: True` ⇒ 自动带 csrf/bili_jct）。
+- 实测：`favops.py add BV17mnA68EqF 4279037787` → `{"ok": true}`，「自动收藏」0 → 1 条 ✓。
 
 **顺手**：两个测试脚本从临时补丁目录挪进仓库 ——
 `tools/emote-selftest.py`（只读自检：白名单 + 库能不能读 + 筛得动）、

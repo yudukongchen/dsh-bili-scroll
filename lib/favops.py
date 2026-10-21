@@ -48,21 +48,45 @@ async def folders():
 
 
 async def add(bvid, fid):
+    """把一条视频加进收藏夹。
+
+    ⚠️⚠️ 0.1.19 这段是照着**不存在的 API** 写的（2026-10-21 实测）：
+      · `favorite_list.FavoriteListResource` 这个类库里根本没有；
+      · `add()` 里连 `favorite_list` 都没 import（只有 `folders()` 里 import 了）⇒
+        点「补收藏今天的」必然 `name 'favorite_list' is not defined`，一条也进不去 ✗；
+      · 而且 `favorite_list.FavoriteList` 只有 get_info / get_content（**只读**），没有 add；
+      · 这个库的端点表里也没有"把视频加进收藏夹"的端点（只有 move / copy / rm / clean）。
+    ⇒ 现在直接走官方那个端点的原始 spec：POST `/x/v3/fav/resource/deal`
+      （`rid`=aid、`type`=2 视频、`add_media_ids`=目标收藏夹、`del_media_ids` 留空）。
+      用库自己的 `Api` 发，CSRF（bili_jct）由它按 `verify: True` 自动带 ✓
+    """
     from bilibili_api import video as ba_video
+    from bilibili_api.utils.network import Api
     cred, _ = load()
     v = ba_video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     aid = int(info['aid'])
-    res = await favorite_list.FavoriteList(aid, credential=cred).get_info()
+    api = {
+        'url': 'https://api.bilibili.com/x/v3/fav/resource/deal',
+        'method': 'POST',
+        'verify': True,          # verify=True ⇒ 库会带上 csrf（bili_jct）
+        'data': {
+            'rid': 'int: 稿件 avid',
+            'type': 'int: 2 = 视频',
+            'add_media_ids': 'str: 要加入的收藏夹 ID（多个用逗号）',
+            'del_media_ids': 'str: 要移出的收藏夹 ID，留空',
+        },
+    }
+    data = {'rid': aid, 'type': 2, 'add_media_ids': str(int(fid)), 'del_media_ids': ''}
     try:
-        await favorite_list.FavoriteListResource(aid, type_=2, credential=cred).add(fid)
+        res = await Api(**api, credential=cred).update_data(**data).result
     except Exception as error:  # noqa: BLE001
         msg = str(error)
-        # 已经收藏过不算失败
+        # 已经收藏过不算失败（B站 对重复收藏回的是错误码/文案）
         if '已经' in msg or 'already' in msg.lower():
             out({'ok': True, 'already': True})
         out({'ok': False, 'error': msg[:200]})
-    out({'ok': True})
+    out({'ok': True, 'data': res if isinstance(res, (int, str)) else None})
 
 
 def main():
