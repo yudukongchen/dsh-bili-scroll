@@ -160,6 +160,7 @@ window.__ModuleLoader__.load({
       const [dmMins, setDmMins] = React.useState(null)      // 轮询间隔（分钟）
       const [dmPerDay, setDmPerDay] = React.useState(null)  // 每天最多回几条（0=只读不回）
       const [dmOwner, setDmOwner] = React.useState(null)    // 私信回给谁的 UID（0=按「@ 谁」查）
+      const [sesMode, setSesMode] = React.useState(null)    // 每轮新会话 / 全部续同一条
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -189,6 +190,7 @@ window.__ModuleLoader__.load({
         if (cfg && dmMins === null) setDmMins(String(cfg.dmWatchMinutes ?? 1))
         if (cfg && dmPerDay === null) setDmPerDay(String(cfg.dmReplyPerDay ?? 0))
         if (cfg && dmOwner === null) setDmOwner(String(cfg.dmOwnerUid ?? 0))
+        if (cfg && sesMode === null) setSesMode(cfg.sessionMode || 'per-round')
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
 
@@ -585,6 +587,18 @@ window.__ModuleLoader__.load({
             h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得（默认）'),
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
+          h('div', { 'data-bd-label': '' }, '每一轮用哪条会话'),
+          h('select', {
+            'data-bd-input': '', value: sesMode ?? 'per-round',
+            onChange: (e) => { setSesMode(e.target.value); patch({ sessionMode: e.target.value }, '会话方式') },
+          },
+            h('option', { value: 'per-round' }, '每轮新开一条（默认）—— 上下文干净，记账靠判重表 / 报告'),
+            h('option', { value: 'fixed' }, '全部续在同一条 —— 列表干净、它记得上一轮，但越跑越贵')),
+          h('div', { 'data-bd-note': '' }, (sesMode === 'fixed')
+            ? ('⚠️ 上下文会累积：每轮都会把之前所有轮次（连它读过的字幕原文）一起带上，跑久了更贵，也可能撞上下文上限。'
+              + '「私信回复」那一轮不受影响，仍单独开一条。'
+              + (st && st.fixedSessionId ? '当前记的是：' + st.fixedSessionId : '（还没记下会话 id，下一轮跑完会自动记）'))
+            : '⭐ 建议就用默认：每轮的记忆靠「判重表 + 今天那份报告」这两个文件，比聊天历史可靠。'),
         h('div', { 'data-bd-label': '' }, '自动收藏到（这一轮挑中的视频存进你的收藏夹）'),
         h('select', {
           'data-bd-input': '', value: favId ?? '0',
