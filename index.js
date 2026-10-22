@@ -2048,9 +2048,12 @@ export function apply(ctx, config) {
     refreshCfg()
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
+    // ⭐ 设置页要显示"当前续的是哪条会话"（sessionMode=fixed 时）——HTTP 这份也得带上
+
     return {
       ok: true,
       home: stateDir,
+      fixedSessionId: fixedSessionId(),
       config: cfg,
       windows: WINDOWS,
       today,
