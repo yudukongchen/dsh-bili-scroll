@@ -193,6 +193,7 @@ try {
   writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({ sessionId: lockedId, ownerUid: 42 }))
   writeFileSync(LOCKED_FLAG, '1')
   const done6 = dmRuns().length
+  const quotaBefore7 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
   nextKey = 'k6'
   await until(() => dmRuns().length >= done6 + 2, 10000, '锁住的那条 + 重来的那条')
   const locked = dmRuns()[done6] || { short: [] }
@@ -202,16 +203,21 @@ try {
   check((dmRec() || {}).sessionId === retried.created, '改记了新会话 id', String((dmRec() || {}).sessionId || ''))
   check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k6', '重来回成之后才把这条记成"已回"')
   check(/改用新会话重来一次/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), '日志里明说为什么重来')
+  const quota7 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
+  check(quota7 === quotaBefore7 + 1, '这一次（含那次白跑的续会话）只占 1 条额度', `${quotaBefore7} → ${quota7}`)
   rmSync(LOCKED_FLAG, { force: true })
 
   /* ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才放弃 */
   writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({}))   // 别让它走"续会话"那条路，专心验重试
   writeFileSync(FAIL_FLAG, '1')
   const done7 = dmRuns().length
+  const quotaBefore8 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
   nextKey = 'k7'
   await until(() => /试了 3 次都没回成/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), 15000, '试满 3 次')
   const failed = dmRuns().slice(done7).filter((l) => l.failed)
   check(failed.length === 3, '回不成的消息一共试了 3 次（不是一次就丢）', String(failed.length) + ' 次')
+  const quota8 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
+  check(quota8 === quotaBefore8, '回不成的不占今天的额度', `${quotaBefore8} → ${quota8}`)
   check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k7', '试满 3 次才把它记成"已回"，不再刷')
   rmSync(FAIL_FLAG, { force: true })
 } catch (e) {

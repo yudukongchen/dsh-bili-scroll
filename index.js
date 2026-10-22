@@ -1521,6 +1521,16 @@ export function apply(ctx, config) {
   const markDmSeen = (uid, key) => {
     try { const seen = readJson(dmSeenFile, {}); seen[String(uid)] = String(key); writeJson(dmSeenFile, seen) } catch { /* 记不上最坏是下一跳重复回一句 */ }
   }
+  /** ⭐ 也只有**真回成了**才占今天的额度（失败/白跑的不占 —— 不然一次失败就白吃一条额度 ✗） */
+  const bumpDmQuota = () => {
+    try {
+      const q = readJson(dmQuotaFile, { day: '', n: 0 })
+      const today = dayKey()
+      if (q.day !== today) { q.day = today; q.n = 0 }
+      q.n = Number(q.n || 0) + 1
+      writeJson(dmQuotaFile, q)
+    } catch { /* 记不上最坏是额度算少一条 */ }
+  }
   let dmUidCache = 0
 
   /** 「私信回给谁」的 UID：dmOwnerUid > dmUid > 昵称查出来的缓存 */
@@ -1636,8 +1646,9 @@ export function apply(ctx, config) {
       child.on('exit', (code) => {
         if (dmKillTimer) { clearTimeout(dmKillTimer); dmKillTimer = null }
         log(`私信回复结束（code=${code}）`)
-        // ⭐ **回成了才记 seen**：失败的那条下一跳还会被看到 ⇒ 还能补（别像以前那样静默丢掉）
-        if (code === 0 && msgKey) markDmSeen(fromUid, msgKey)
+        // ⭐ **回成了才记 seen + 才占今天的额度**：失败的那条下一跳还会被看到、还能补
+        //    （额度也别被白跑的那一次吃掉 —— 2026-10-22 主人那天就是被吃掉一条才发现）
+        if (code === 0 && msgKey) { markDmSeen(fromUid, msgKey); bumpDmQuota() }
         // ⭐ 记账：刚开出来的那条会话记下来；"续会话失败"就把记的清掉 ⇒ 下一次自愈
         if (useFixed) {
           if (usedSessionId && code !== 0) {
@@ -1741,9 +1752,8 @@ export function apply(ctx, config) {
         }
         writeJsonSafe(dmTriesFile, t)
         log(`私信监听：收到新消息 —— ${last.text.slice(0, 40)}`)
-        const r = runDmReply(s.uid, last.text, last.key)
-        // ⭐ 起不来（比如找不到 dsh）就不占今天的额度
-        if (r?.ok) { quota.n++; writeJsonSafe(dmQuotaFile, quota) }
+        // ⭐ 额度在**回成了**那一刻才 +1（见 runDmReply 的 exit）—— 这里只管"能不能试"
+        runDmReply(s.uid, last.text, last.key)
       }
     } catch (e) {
       log('私信监查出错（已兜住）：' + String(e?.message ?? e))

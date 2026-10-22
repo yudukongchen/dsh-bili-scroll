@@ -524,7 +524,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '每天最多回几条'),
-                h('div', { 'data-bd-note': '' }, '**0 = 只读不回**（只监听、一分钱不花）；填 1~50 才是真回')),
+                h('div', { 'data-bd-note': '' }, '**0 = 只读不回**（只监听、一分钱不花）；填 1~50 才是真回。只算**真回成的**（失败的不占额度）')),
               h('input', {
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50, value: dmPerDay ?? '',
                 onChange: (e) => setDmPerDay(e.target.value),
