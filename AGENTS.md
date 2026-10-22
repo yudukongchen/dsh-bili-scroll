@@ -47,14 +47,16 @@
 - `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`dm.mjs` + `uid.mjs`（私信双向：读会话/读消息、昵称查 UID）** / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
-- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
+- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 15 秒，不花 token）
 
 ## 约定
 
 - 配置与运行数据都在用户的 `$DSH_HOME/bili-duty/`，**不写进插件包目录**
 - 时段是**三个固定窗口**：早间 07:00–09:00（默认关）/ 中午 12:00–14:00 / 晚间 18:00–23:00（见 `lib/state.mjs` 的 `WINDOWS`）
-- **值班轮用哪条会话**（`sessionMode`，默认 `per-round`）：`fixed` = 所有值班轮用 `--session-id` 续在同一条上
-  （id 记在插件家 `session.json`；只认插件家那个会话桶）；**私信回复那一轮永远单独开**，避免撞 `session.lock`
+- **私信回复用哪条会话**（`dmSessionMode`，默认 `fixed`）：`fixed` = 私信回复用 `--session-id` 续在同一条上
+  （id 记在插件家 `dm-session.json`，连着「回给谁」的 uid —— 换人就另开一条；只认插件家那个会话桶）；
+  **值班轮（A/B）永远每轮新开一条**、不吃会话历史（上一版的 `sessionMode` 已撤掉）
 - **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
   （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
   回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）

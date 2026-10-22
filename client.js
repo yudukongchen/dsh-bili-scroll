@@ -160,7 +160,7 @@ window.__ModuleLoader__.load({
       const [dmMins, setDmMins] = React.useState(null)      // 轮询间隔（分钟）
       const [dmPerDay, setDmPerDay] = React.useState(null)  // 每天最多回几条（0=只读不回）
       const [dmOwner, setDmOwner] = React.useState(null)    // 私信回给谁的 UID（0=按「@ 谁」查）
-      const [sesMode, setSesMode] = React.useState(null)    // 每轮新会话 / 全部续同一条
+      const [dmSes, setDmSes] = React.useState(null)        // 私信回复：续同一条会话 / 每条新开
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -190,7 +190,7 @@ window.__ModuleLoader__.load({
         if (cfg && dmMins === null) setDmMins(String(cfg.dmWatchMinutes ?? 1))
         if (cfg && dmPerDay === null) setDmPerDay(String(cfg.dmReplyPerDay ?? 0))
         if (cfg && dmOwner === null) setDmOwner(String(cfg.dmOwnerUid ?? 0))
-        if (cfg && sesMode === null) setSesMode(cfg.sessionMode || 'per-round')
+        if (cfg && dmSes === null) setDmSes(cfg.dmSessionMode || 'fixed')
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
 
@@ -540,6 +540,18 @@ window.__ModuleLoader__.load({
                 onChange: (e) => setDmOwner(e.target.value),
                 onBlur: () => { const n = Math.max(0, Number(dmOwner) || 0); setDmOwner(String(n)); patch({ dmOwnerUid: n }, '私信回给谁') },
               })),
+            h('div', { 'data-bd-label': '' }, '私信回复用哪条会话'),
+            h('select', {
+              'data-bd-input': '', value: dmSes ?? 'fixed',
+              onChange: (e) => { setDmSes(e.target.value); patch({ dmSessionMode: e.target.value }, '私信会话方式') },
+            },
+              h('option', { value: 'fixed' }, '续在同一条会话（默认）—— 它记得上一句跟你说了什么，聊天才像聊天'),
+              h('option', { value: 'per-round' }, '每条私信新开一条 —— 更省、上下文干净，但它不记得上一句')),
+            h('div', { 'data-bd-note': '' },
+              '⚠️ 续同一条 = 每次回你都会把之前那串私信（连同里头读过的字幕）一起带上 ⇒ 聊得越久越贵。'
+              + (st && st.dmSessionId ? '当前续的是：' + st.dmSessionId : '（还没记下会话 id，回完第一条会自动记）'),
+              h('br'),
+              '⭐ 值班轮（刷、挑、写报告）不受影响：它永远每轮新开一条 —— 记忆靠判重表和当天那份报告，比聊天历史可靠。'),
             h('div', { 'data-bd-note': '' }, '⚠️ 只在「你本人」那个号发来的私信上回；回复内容 100 字以内、像聊天（私信里带视频 BV 号的话，它还会先读字幕再答）')) : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
@@ -587,18 +599,6 @@ window.__ModuleLoader__.load({
             h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得（默认）'),
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
-          h('div', { 'data-bd-label': '' }, '每一轮用哪条会话'),
-          h('select', {
-            'data-bd-input': '', value: sesMode ?? 'per-round',
-            onChange: (e) => { setSesMode(e.target.value); patch({ sessionMode: e.target.value }, '会话方式') },
-          },
-            h('option', { value: 'per-round' }, '每轮新开一条（默认）—— 上下文干净，记账靠判重表 / 报告'),
-            h('option', { value: 'fixed' }, '全部续在同一条 —— 列表干净、它记得上一轮，但越跑越贵')),
-          h('div', { 'data-bd-note': '' }, (sesMode === 'fixed')
-            ? ('⚠️ 上下文会累积：每轮都会把之前所有轮次（连它读过的字幕原文）一起带上，跑久了更贵，也可能撞上下文上限。'
-              + '「私信回复」那一轮不受影响，仍单独开一条。'
-              + (st && st.fixedSessionId ? '当前记的是：' + st.fixedSessionId : '（还没记下会话 id，下一轮跑完会自动记）'))
-            : '⭐ 建议就用默认：每轮的记忆靠「判重表 + 今天那份报告」这两个文件，比聊天历史可靠。'),
         h('div', { 'data-bd-label': '' }, '自动收藏到（这一轮挑中的视频存进你的收藏夹）'),
         h('select', {
           'data-bd-input': '', value: favId ?? '0',

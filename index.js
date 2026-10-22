@@ -105,12 +105,12 @@ export const Config = !z ? undefined : z.object({
   replyPerRound: z.number().default(1).extra('volatile', true),
   /** 自动收藏：0 = 不收藏；>0 = 目标收藏夹 fid（设置页下拉选）。动作在宿主侧完成，模型拿不到这只手 */
   favFolderId: z.number().default(0).extra('volatile', true),
-  /** ⭐ 这一轮用不用**同一条会话**（2026-10-22 加）：
-   *   · `per-round`（默认）= 每轮新开一条 —— 上下文干净，记账靠文件（判重表/报告）
-   *   · `fixed` = 所有值班轮**续在同一条会话**上 —— 列表干净、它也能"记得"上一轮，
-   *     ⚠️ 但上下文会累积（每轮都把之前的对话一起带上）⇒ 越跑越贵，也可能撞上下文上限
-   *  ⚠️ 「私信回复」那一轮**永远单独开**：同一条会话被两个进程写会撞 `session.lock` */
-  sessionMode: z.string().default('per-round').extra('volatile', true),
+  /** ⭐ 「私信回复」续不续在**同一条会话**上（2026-10-22 加，加完当天就改成只给私信）：
+   *   · `fixed`（**默认**）= 私信回复续在同一条会话上 —— 它才"记得上一句跟你说了什么"，聊天才像聊天
+   *   · `per-round` = 每条私信新开一条 —— 上下文干净、更省，但它不记得上一句
+   *  ⚠️ **值班轮（A/B）永远每轮新开一条**：它的记忆靠文件（判重表 + 报告），
+   *     而"把每轮读过的**字幕原文**都续进上下文"只会越跑越贵 ⇒ 上一版的 sessionMode 已按此撤掉 */
+  dmSessionMode: z.string().default('fixed').extra('volatile', true),
 })
 
 /**
@@ -220,7 +220,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, morning: false, noon: true, evening: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmWatch: false, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', overlayModel: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0, sessionMode: 'per-round',
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', overlayModel: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0, dmSessionMode: 'fixed',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -237,8 +237,9 @@ export function apply(ctx, config) {
     if (out.evening === base.evening && src && typeof src.night === 'boolean' && src.evening === undefined) out.evening = src.night
     // ⭐ 「自动评论每轮最多几条」已固定为 1（配置项隐藏）—— 读进来一律按 1 走
     out.commentPerRound = 1
-    // ⭐ 「同一条会话」只认这两个值（DSH 原生设置页可能塞别的进来）
-    if (!['per-round', 'fixed'].includes(out.sessionMode)) out.sessionMode = 'per-round'
+    // ⭐ 「私信回复用哪条会话」只认这两个值（DSH 原生设置页可能塞别的进来）
+    //    ⚠️ 上一版的 `sessionMode`（值班轮续同一条）已撤掉：这里的键名换了，老值一概不再生效 ✓
+    if (!['per-round', 'fixed'].includes(out.dmSessionMode)) out.dmSessionMode = 'fixed'
     return out
   }
   /* ── 配置从哪来：DSH 自带的「插件设置」页 > 插件自己的 config.json > 默认值 ──
@@ -265,7 +266,7 @@ export function apply(ctx, config) {
     if ('dmWatchMinutes' in p) p.dmWatchMinutes = Math.max(1, Math.min(Number(p.dmWatchMinutes) || 1, 60))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 50))
     if ('dmOwnerUid' in p) p.dmOwnerUid = Math.max(0, Math.floor(Number(p.dmOwnerUid) || 0))
-    if ('sessionMode' in p) p.sessionMode = ['per-round', 'fixed'].includes(String(p.sessionMode)) ? String(p.sessionMode) : 'per-round'
+    if ('dmSessionMode' in p) p.dmSessionMode = ['per-round', 'fixed'].includes(String(p.dmSessionMode)) ? String(p.dmSessionMode) : 'fixed'
     // ⭐ 2026-10-21：「每轮最多发几条评论」**固定 1、配置项隐藏** —— 写什么进来都按 1 算
     //    （老客户端/老原生设置页还可能提交这个键，一律忽略，别让它把口径改回去 ✗）
     if ('commentPerRound' in p) p.commentPerRound = 1
@@ -633,8 +634,8 @@ export function apply(ctx, config) {
           opening: inWindow(now, w),
         }])),
         peakValley: cfg.peakValley,
-        sessionMode: cfg.sessionMode,
-        fixedSessionId: fixedSessionId(),
+        dmSessionMode: cfg.dmSessionMode,
+        dmSessionId: dmSessionRecord().sessionId,
         autoComment: cfg.autoComment,
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
@@ -1215,6 +1216,7 @@ export function apply(ctx, config) {
   const B_GAP_MS = Math.max(10, Number(process.env.BILI_DUTY_B_GAP_SEC || 300)) * 1000            // 轮间隔（默认 5 分钟）
   const ROUND_MAX_MS = Math.max(30, Number(process.env.BILI_DUTY_ROUND_MAX_SEC || 1200)) * 1000   // 单轮上限（默认 20 分钟）
   let runningRound = null      // { mode, why, win, pid, killed } | null —— 同一时刻只允许一轮
+  let dmRoundRunning = null    // 私信回复那一轮（它**不在** runningRound 里：它要续会话、值班轮不续）
   let roundKillTimer = null
 
   /** 自动调度的状态（只认今天） */
@@ -1262,19 +1264,21 @@ export function apply(ctx, config) {
     } catch (e) { log(`杀进程树失败：${e?.message ?? e}`) }
   }
 
-  /* ─────────────── 「同一条会话」（sessionMode=fixed）───────────────
+  /* ─────────────── 「私信回复续在同一条会话上」（dmSessionMode=fixed，默认）───────────────
    * DSH 的 headless app 有 `--session-id <id>`：adopt 那条已存在的会话（未知 id 会报错）。
-   * 会话按 cwd 分桶存在 `<DSH 家>/sessions/<桶>/session-<uuid>/`，值班轮的 cwd = 插件家，
+   * 会话按 cwd 分桶存在 `<DSH 家>/sessions/<桶>/session-<uuid>/`，两处轮次的 cwd 都是插件家，
    * 而插件家就在 DSH 家里 ⇒ 桶目录 = `dirname(插件家)/sessions` ✓
    * 取 id 的办法不靠猜桶名（路径可能有 `.`）：**跑之前先拍一张盘上会话 id 的快照，
-   * 跑完多出来的那条就是这一轮的** ⇒ 存进家目录的 `session.json`，下一轮续它 ✓
+   * 跑完多出来的那条就是这一轮的** ⇒ 存进家目录的 `dm-session.json`，下一次私信续它 ✓
+   * ⚠️ 值班轮（A/B）**永远不 adopt**（每轮新开）。这既是"没必要"（它的记忆靠文件），
+   *    也是**安全**：`session.lock` 是真 flock，同一个会话被两个进程同时写 ⇒ 后一个直接失败 ✗
    */
   const sessionsRoot = join(dirname(stateDir), 'sessions')
-  const sessionFile = join(stateDir, 'session.json')
+  const dmSessionFile = join(stateDir, 'dm-session.json')
   // ⭐ 桶名 = `--` + 路径去掉开头 `/`、`/` 换成 `-` + `--`（本机实测：
   //    /home/ubuntu/.dsh/bili-duty → --home-ubuntu-.dsh-bili-duty--，/tmp → --tmp--）
   //    🔴 **只认插件家自己那个桶**：别的会话（比如 GUI 里刚点开的）绝不能被当成"这一轮的"
-  //    ⚠️ 万一以后 DSH 改了命名规则 ⇒ 这里认不出来 ⇒ 只是记不上、退回"每轮新开"，不会记错 ✓
+  //    ⚠️ 万一以后 DSH 改了命名规则 ⇒ 这里认不出来 ⇒ 只是记不上、退回"每条新开"，不会记错 ✓
   const ownBucket = '--' + String(stateDir).replace(/^[/\\]/, '').replace(/[/\\]/g, '-') + '--'
   const sessionIdsOnDisk = () => {
     const out = new Map()
@@ -1289,12 +1293,21 @@ export function apply(ctx, config) {
           try { out.set(name, statSync(join(dir, name)).mtimeMs) } catch { /* 单条读不到就跳过 */ }
         }
       }
-    } catch { /* sessions 目录都没有 ⇒ 空手回去，下一轮当"没记过"处理 */ }
+    } catch { /* sessions 目录都没有 ⇒ 空手回去，下一次当"没记过"处理 */ }
     return out
   }
-  const fixedSessionId = () => String(readJson(sessionFile, {}).valueSessionId || '')
-  const saveFixedSessionId = (id) => { try { writeJson(sessionFile, { valueSessionId: String(id), updatedAt: new Date().toISOString() }) } catch (e) { log(`记会话 id 失败：${e?.message ?? e}`) } }
-  const clearFixedSessionId = () => { try { writeJson(sessionFile, { valueSessionId: '', updatedAt: new Date().toISOString() }) } catch { /* 清不掉也只是下一轮再试一次 */ } }
+  /** 记的那条会话 + 它是回谁的私信（`dm-session.json`） */
+  const dmSessionRecord = () => {
+    const r = readJson(dmSessionFile, {})
+    return { sessionId: String(r?.sessionId || ''), ownerUid: Number(r?.ownerUid) || 0 }
+  }
+  /** ⭐ **换了回给谁就另开一条**：私信会话里全是"上一次那个人的聊天记录"，不能给下一个人看 */
+  const savedDmSessionId = (ownerUid) => {
+    const r = dmSessionRecord()
+    return (r.sessionId && r.ownerUid === Number(ownerUid)) ? r.sessionId : ''
+  }
+  const saveDmSessionId = (id, ownerUid) => { try { writeJson(dmSessionFile, { sessionId: String(id), ownerUid: Number(ownerUid) || 0, updatedAt: new Date().toISOString() }) } catch (e) { log(`记私信会话 id 失败：${e?.message ?? e}`) } }
+  const clearDmSessionId = () => { try { writeJson(dmSessionFile, {}) } catch { /* 清不掉也只是下一次再试一次 */ } }
 
   /**
    * 跑一轮。mode：
@@ -1317,21 +1330,14 @@ export function apply(ctx, config) {
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
-    // ⭐ sessionMode=fixed：所有值班轮续同一条会话。
-    //    ⚠️ 「私信回复」那一轮不经过这里（runDmReply 自己 spawn）⇒ 不会两条进程写同一条会话 ✓
-    const useFixedSession = String(cfg.sessionMode || 'per-round') === 'fixed'
-    let usedSessionId = ''
-    let idsBefore = null
-    if (useFixedSession) {
-      const saved = fixedSessionId()
-      const onDisk = sessionIdsOnDisk()
-      if (saved && onDisk.has(saved)) {
-        usedSessionId = saved
-        args.push('--session-id', saved)
-      } else {
-        if (saved) log(`续会话：记的那条 ${saved} 已经不在盘上了 ⇒ 这一轮重新开一条`)
-        idsBefore = onDisk        // 拍快照：跑完多出来的那条就是这一轮
-      }
+    // ⭐ 上一版在这里给值班轮接过 `--session-id`（sessionMode）；2026-10-22 撤掉了 ——
+    //    值班轮的上下文越续越大（每轮读过的字幕原文都在里头）⇒ 每轮新开，记忆靠文件 ✓
+    // ⭐ 私信回复正在跑 ⇒ 这一轮别抢：两条轮次的 cwd 是同一个会话桶，
+    //    同时跑会让"刚开出来的是哪条会话"认不清（那条记账在 runDmReply 里）
+    if (dmRoundRunning) {
+      const msg = '这一轮没跑：私信回复正在跑，等它结束再跑（最多 20 分钟）'
+      log(msg)
+      return { started: false, why, error: msg }
     }
     args.push(promptFor(mode))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
@@ -1390,21 +1396,6 @@ export function apply(ctx, config) {
       log(`刷B站结束（${why}，任务${mode}，code=${code}${wasKilled ? '，**超时被杀**' : ''}）`)
       if (roundKillTimer) { clearTimeout(roundKillTimer); roundKillTimer = null }
       runningRound = null
-      // ⭐ sessionMode=fixed 的记账：刚开出来的会话记下来；"续会话失败"就把记的清掉（下一轮自愈）
-      if (useFixedSession) {
-        if (usedSessionId && code !== 0) {
-          clearFixedSessionId()
-          log(`续会话失败（code=${code}）⇒ 已清掉记的会话 id（${usedSessionId}），下一轮重新开一条`)
-        } else if (!usedSessionId) {
-          try {
-            const after = sessionIdsOnDisk()
-            const base = idsBefore || new Map()
-            const fresh = [...after.entries()].filter(([id]) => !base.has(id)).sort((a, b) => b[1] - a[1])[0]
-            if (fresh) { saveFixedSessionId(fresh[0]); log(`续会话：这一轮的会话是 ${fresh[0]}，下一轮续它`) }
-            else log('续会话：没认出这一轮新开的会话 ⇒ 没记上，下一轮照旧新开')
-          } catch (e) { log(`续会话记账出错（已兜住）：${e?.message ?? e}`) }
-        }
-      }
       // ⭐ 调度器交账：这一轮是谁的、下一轮什么时候能起（轮间隔）
       if (win) {
         try {
@@ -1454,7 +1445,7 @@ export function apply(ctx, config) {
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
       if (!cfg.peakValley) return     // 总开关（字段名沿用 peakValley）
-      if (runningRound) return        // 上一轮还没跑完 ⇒ 什么都不排（单轮 ≤ 20 分钟由 kill 定时器兜）
+      if (runningRound || dmRoundRunning) return   // 上一轮/私信那轮还没跑完 ⇒ 什么都不排（单轮 ≤ 20 分钟由 kill 定时器兜）
       const now = new Date()
       const W = autoState()
       const quota = Number(cfg.perDay || 0)
@@ -1570,7 +1561,9 @@ export function apply(ctx, config) {
   let dmKillTimer = null
   let dmBusy = false
 
-  /** 起一轮很小的任务回这条私信（⭐ 本地补的第 ③ 条：20 分钟上限） */
+  /** 起一轮很小的任务回这条私信（⭐ 本地补的第 ③ 条：20 分钟上限）
+   *  ⭐ 2026-10-22：它现在**续在同一条会话**上（`dmSessionMode=fixed`，默认）——
+   *    这样"上一次跟你说了什么"还在上下文里，聊天才像聊天；值班轮反过来，永远每轮新开 ✓ */
   const runDmReply = (fromUid, text) => {
     try {
       refreshCfg()
@@ -1579,13 +1572,41 @@ export function apply(ctx, config) {
       const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
       if (overlay) args.push('--patch', overlay)
+      // ⭐ 续会话：记的那条还在盘上、而且是回**同一个人**的 ⇒ adopt 它；否则这一条新开、跑完记下来
+      const useFixed = String(cfg.dmSessionMode || 'fixed') === 'fixed'
+      let usedSessionId = ''
+      let idsBefore = null
+      if (useFixed) {
+        const rec = dmSessionRecord()
+        const onDisk = sessionIdsOnDisk()
+        const saved = savedDmSessionId(fromUid)
+        if (saved && onDisk.has(saved)) {
+          usedSessionId = saved
+          args.push('--session-id', saved)
+        } else {
+          if (rec.sessionId) {
+            log(rec.ownerUid === Number(fromUid)
+              ? `私信续会话：记的那条 ${rec.sessionId} 已经不在盘上了 ⇒ 这条重新开一条`
+              : `私信续会话：记的那条是回 uid=${rec.ownerUid} 的，这条要回 uid=${fromUid} ⇒ 另开一条（不把上一个人的聊天记录带进来）`)
+          }
+          idsBefore = onDisk        // 拍快照：跑完多出来的那条就是这一条
+        }
+      }
       args.push(dmPromptFor(fromUid, text))
-      log(`私信回复开跑：来自 uid=${fromUid}`)
+      log(`私信回复开跑：来自 uid=${fromUid}${usedSessionId ? `（续会话 ${usedSessionId}）` : '（新开一条）'}`)
       const child = spawn(dsh.command, args, {
         cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
       })
+      // ⭐ 这一轮在跑：值班轮和下一跳私信都先让路（同一个会话被两个进程写 ⇒ `session.lock` 那个 flock 直接失败）
+      dmRoundRunning = { pid: child.pid, startedAt: Date.now(), ownerUid: Number(fromUid) || 0 }
+      // ⭐ 也让**别的宿主**看见"这一轮还没结束"（只靠 dm-lock 的 3 分钟新鲜度不够：单轮上限是 20 分钟）
+      try {
+        const lockFile = join(stateDir, 'dm-lock.json')
+        const lock = readJson(lockFile, {}) || {}
+        writeJsonSafe(lockFile, { ...lock, pid: process.pid, ts: Date.now(), busyUntil: Date.now() + ROUND_MAX_MS + 60_000 })
+      } catch { /* 写不上就只靠本进程里那个标志 */ }
       const toText = (buf) => { try { const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)); const u = b.toString('utf8'); return u.includes('\uFFFD') ? (() => { try { return new TextDecoder('gbk').decode(b) } catch { return u } })() : u } catch { return String(buf) } }
       const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 丢日志也不能抛 */ } }
       child.stdout?.on('data', pick)
@@ -1599,11 +1620,29 @@ export function apply(ctx, config) {
       dmKillTimer.unref?.()
       child.on('exit', (code) => {
         if (dmKillTimer) { clearTimeout(dmKillTimer); dmKillTimer = null }
-        log(`私信回复结束（code=${code}）`); rotateLogIfBig()
+        dmRoundRunning = null
+        log(`私信回复结束（code=${code}）`)
+        // ⭐ 记账：刚开出来的那条会话记下来；"续会话失败"（比如被 kill / 撞锁）就把记的清掉 ⇒ 下一次自愈
+        if (useFixed) {
+          if (usedSessionId && code !== 0) {
+            clearDmSessionId()
+            log(`私信续会话失败（code=${code}）⇒ 已清掉记的会话 id（${usedSessionId}），下一次重新开一条`)
+          } else if (!usedSessionId) {
+            try {
+              const after = sessionIdsOnDisk()
+              const base = idsBefore || new Map()
+              const fresh = [...after.entries()].filter(([id]) => !base.has(id)).sort((a, b) => b[1] - a[1])
+              if (fresh.length === 1) { saveDmSessionId(fresh[0][0], fromUid); log(`私信续会话：这一条的会话是 ${fresh[0][0]}（回 uid=${fromUid}），下一次续它`) }
+              else if (fresh.length) log(`私信续会话：这一跳多出来 ${fresh.length} 条会话（有别的轮次同时在跑？）⇒ 不记，下一次重新认`)
+              else log('私信续会话：没认出这一跳新开的会话 ⇒ 没记上，下一次照旧新开')
+            } catch (e) { log(`私信续会话记账出错（已兜住）：${e?.message ?? e}`) }
+          }
+        }
+        rotateLogIfBig()
       })
-      child.on('error', (e) => log('私信回复起不来：' + String(e?.message ?? e)))
+      child.on('error', (e) => { dmRoundRunning = null; log('私信回复起不来：' + String(e?.message ?? e)) })
       return { ok: true }
-    } catch (e) { log('私信回复出错：' + String(e?.message ?? e)); return { ok: false } }
+    } catch (e) { dmRoundRunning = null; log('私信回复出错：' + String(e?.message ?? e)); return { ok: false } }
   }
 
   async function dmTick() {
@@ -1612,18 +1651,22 @@ export function apply(ctx, config) {
     try { refreshCfg() } catch { /* 读不到就沿用旧值 */ }
     try {
       // ⭐ 值班轮（A/B）在跑就先不抢：这条不标记已读，下一跳再来 ✓
-      if (runningRound) return
+      // ⭐ 上一条私信还在回也先不抢：两条同时写同一个会话 ⇒ `session.lock` 直接失败 ✗
+      //    （放在这里很关键：早于"标记已读"，所以这条消息下一跳还会被看到 ✓）
+      if (runningRound || dmRoundRunning) return
       // ⭐ 每机锁：同一条私信别被两个宿主各回一遍（桌面版 + web 版同机时）
       {
         const lockFile = join(stateDir, 'dm-lock.json')
         const lock = readJson(lockFile, null)
         const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true } catch { return false } }
         const fresh = lock && Number(lock.ts) > Date.now() - 3 * 60_000
-        if (fresh && Number(lock.pid) !== process.pid && alive(Number(lock.pid))) {
+        // ⭐ 它那一条正在回（busyUntil 是 20 分钟上限）⇒ 一直让给它，别等锁"3 分钟过期"就插进去
+        const busy = lock && Number(lock.busyUntil) > Date.now()
+        if ((fresh || busy) && Number(lock.pid) !== process.pid && alive(Number(lock.pid))) {
           log('私信监听：另一个宿主正在跑（pid=' + lock.pid + '）⇒ 这一跳让给它')
           return
         }
-        writeJsonSafe(lockFile, { pid: process.pid, ts: Date.now() })
+        writeJsonSafe(lockFile, { ...(lock || {}), pid: process.pid, ts: Date.now() })
       }
       if (!cfg.dmWatch) return
       const cred = dmCred(stateDir)
@@ -1672,7 +1715,11 @@ export function apply(ctx, config) {
     try {
       if (dmTimer) { clearInterval(dmTimer); dmTimer = null }
       const mins = Math.max(1, Number(cfg.dmWatchMinutes) || 1)
-      dmTimer = setInterval(() => { dmTick().catch((e) => log('私信定时器异常：' + String(e?.message ?? e))) }, mins * 60_000)
+      // ⭐ 只给本地预检用（生产没人设它）：tools/_check-dm-session.mjs 靠它把一跳压成 1 秒，
+      //    否则验一次"续会话"要等好几分钟
+      const fast = Math.max(0, Number(process.env.BILI_DUTY_DM_TICK_SEC || 0))
+      const everyMs = (fast || mins * 60) * 1000
+      dmTimer = setInterval(() => { dmTick().catch((e) => log('私信定时器异常：' + String(e?.message ?? e))) }, everyMs)
       dmTimer.unref?.()
       const cap = Number(cfg.dmReplyPerDay) || 0
       log(`私信监听：${cfg.dmWatch ? '已开' : '关着'}（每 ${mins} 分钟查一次；每天最多回 ${cap} 条${cap ? '' : '＝只读不回'}）`)
@@ -2048,12 +2095,13 @@ export function apply(ctx, config) {
     refreshCfg()
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
-    // ⭐ 设置页要显示"当前续的是哪条会话"（sessionMode=fixed 时）——HTTP 这份也得带上
+    // ⭐ 设置页要显示"私信回复现在续的是哪条会话"（dmSessionMode=fixed 时）——HTTP 这份也得带上
 
     return {
       ok: true,
       home: stateDir,
-      fixedSessionId: fixedSessionId(),
+      dmSessionMode: cfg.dmSessionMode,
+      dmSessionId: dmSessionRecord().sessionId,
       config: cfg,
       windows: WINDOWS,
       today,
@@ -2100,7 +2148,7 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'morning', 'noon', 'evening', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'sessionMode',
+        'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'dmSessionMode',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
