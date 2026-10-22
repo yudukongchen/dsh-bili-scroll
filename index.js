@@ -1509,7 +1509,18 @@ export function apply(ctx, config) {
    */
   const dmSeenFile = join(stateDir, 'dm-seen.json')
   const dmQuotaFile = join(stateDir, 'dm-quota.json')
+  const dmTriesFile = join(stateDir, 'dm-tries.json')     // 同一条消息这一跳试了几次（失败才重试，但不能无限试）
+  const DM_TRIES_MAX = 3
   const writeJsonSafe = (f, obj) => { try { writeJson(f, obj) } catch { /* 写不进去就下次再说 */ } }
+  /**
+   * ⭐⭐ 2026-10-22（真机上踩到）：「**回成了**才记账」。
+   *    以前是"先把这条记成已回、再去回" —— 那一跳只要失败（比如那条会话正被 GUI 握着写锁，
+   *    续不上就 code=1），这条消息就**永远不补了** ✗（主人那天问"我说了它怎么没回我"）。
+   *    现在失败 ⇒ 不记 seen ⇒ 下一跳还会看到它（重试次数由 dm-tries.json 兜住）。
+   */
+  const markDmSeen = (uid, key) => {
+    try { const seen = readJson(dmSeenFile, {}); seen[String(uid)] = String(key); writeJson(dmSeenFile, seen) } catch { /* 记不上最坏是下一跳重复回一句 */ }
+  }
   let dmUidCache = 0
 
   /** 「私信回给谁」的 UID：dmOwnerUid > dmUid > 昵称查出来的缓存 */
@@ -1563,8 +1574,10 @@ export function apply(ctx, config) {
 
   /** 起一轮很小的任务回这条私信（⭐ 本地补的第 ③ 条：20 分钟上限）
    *  ⭐ 2026-10-22：它现在**续在同一条会话**上（`dmSessionMode=fixed`，默认）——
-   *    这样"上一次跟你说了什么"还在上下文里，聊天才像聊天；值班轮反过来，永远每轮新开 ✓ */
-  const runDmReply = (fromUid, text) => {
+   *    这样"上一次跟你说了什么"还在上下文里，聊天才像聊天；值班轮反过来，永远每轮新开 ✓
+   *  msgKey：这条私信的去重键 —— **只有这一轮真回成了**才记进 dm-seen.json（失败还能补）
+   *  opts.retried / opts.freshOnly：续会话失败之后**改用新会话重来一次**用的（见下面 exit 里那段） */
+  const runDmReply = (fromUid, text, msgKey = '', opts = {}) => {
     try {
       refreshCfg()
       const dsh = resolveDsh()
@@ -1577,23 +1590,25 @@ export function apply(ctx, config) {
       let usedSessionId = ''
       let idsBefore = null
       if (useFixed) {
-        const rec = dmSessionRecord()
         const onDisk = sessionIdsOnDisk()
-        const saved = savedDmSessionId(fromUid)
+        const saved = opts.freshOnly ? '' : savedDmSessionId(fromUid)
         if (saved && onDisk.has(saved)) {
           usedSessionId = saved
           args.push('--session-id', saved)
         } else {
-          if (rec.sessionId) {
-            log(rec.ownerUid === Number(fromUid)
-              ? `私信续会话：记的那条 ${rec.sessionId} 已经不在盘上了 ⇒ 这条重新开一条`
-              : `私信续会话：记的那条是回 uid=${rec.ownerUid} 的，这条要回 uid=${fromUid} ⇒ 另开一条（不把上一个人的聊天记录带进来）`)
+          if (!opts.freshOnly) {
+            const rec = dmSessionRecord()
+            if (rec.sessionId) {
+              log(rec.ownerUid === Number(fromUid)
+                ? `私信续会话：记的那条 ${rec.sessionId} 已经不在盘上了 ⇒ 这条重新开一条`
+                : `私信续会话：记的那条是回 uid=${rec.ownerUid} 的，这条要回 uid=${fromUid} ⇒ 另开一条（不把上一个人的聊天记录带进来）`)
+            }
           }
           idsBefore = onDisk        // 拍快照：跑完多出来的那条就是这一条
         }
       }
       args.push(dmPromptFor(fromUid, text))
-      log(`私信回复开跑：来自 uid=${fromUid}${usedSessionId ? `（续会话 ${usedSessionId}）` : '（新开一条）'}`)
+      log(`私信回复开跑：来自 uid=${fromUid}${usedSessionId ? `（续会话 ${usedSessionId}）` : '（新开一条）'}${opts.retried ? '（续会话失败后重来）' : ''}`)
       const child = spawn(dsh.command, args, {
         cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
@@ -1620,13 +1635,25 @@ export function apply(ctx, config) {
       dmKillTimer.unref?.()
       child.on('exit', (code) => {
         if (dmKillTimer) { clearTimeout(dmKillTimer); dmKillTimer = null }
-        dmRoundRunning = null
         log(`私信回复结束（code=${code}）`)
-        // ⭐ 记账：刚开出来的那条会话记下来；"续会话失败"（比如被 kill / 撞锁）就把记的清掉 ⇒ 下一次自愈
+        // ⭐ **回成了才记 seen**：失败的那条下一跳还会被看到 ⇒ 还能补（别像以前那样静默丢掉）
+        if (code === 0 && msgKey) markDmSeen(fromUid, msgKey)
+        // ⭐ 记账：刚开出来的那条会话记下来；"续会话失败"就把记的清掉 ⇒ 下一次自愈
         if (useFixed) {
           if (usedSessionId && code !== 0) {
             clearDmSessionId()
-            log(`私信续会话失败（code=${code}）⇒ 已清掉记的会话 id（${usedSessionId}），下一次重新开一条`)
+            log(`私信续会话失败（code=${code}）⇒ 已清掉记的会话 id（${usedSessionId}）`)
+            /* ⭐⭐ 真机上踩到的：**你在 DSH 里打开 / 改过那条会话**时，宿主会一直握着它的写锁
+             *   （`session.lock` 是 flock，写到那个标签关掉为止）⇒ 插件这条会话就续不上（code=1）✗。
+             *   ⇒ 这一条**改用新会话立刻重来一次**：`--session-id` 撑不住时 DSH 在**跑模型之前**就失败了
+             *     （几秒、零 token）⇒ 重来这一次既不漏回、也不多花钱 ✓
+             *   ⚠️ 只重来一次（opts.retried），而且**不在这里清 dmRoundRunning**：新一轮马上同步接手，
+             *      免得定时器在这个缝里插进来、把同一条消息回两遍 ✓ */
+            if (!opts.retried) {
+              log('私信续会话失败 ⇒ 这一条改用新会话重来一次')
+              runDmReply(fromUid, text, msgKey, { retried: true, freshOnly: true })
+              return
+            }
           } else if (!usedSessionId) {
             try {
               const after = sessionIdsOnDisk()
@@ -1638,6 +1665,7 @@ export function apply(ctx, config) {
             } catch (e) { log(`私信续会话记账出错（已兜住）：${e?.message ?? e}`) }
           }
         }
+        dmRoundRunning = null
         rotateLogIfBig()
       })
       child.on('error', (e) => { dmRoundRunning = null; log('私信回复起不来：' + String(e?.message ?? e)) })
@@ -1697,14 +1725,25 @@ export function apply(ctx, config) {
         const last = [...msgs].reverse().find((m) => !m.fromMe)
         if (!last) continue
         if (seen[String(s.uid)] === last.key) continue
-        seen[String(s.uid)] = last.key
-        writeJsonSafe(dmSeenFile, seen)
-        if (Number(cfg.dmReplyPerDay) === 0) { log('私信监听：收到新消息（dmReplyPerDay=0 = 只读不回）：' + last.text.slice(0, 40)); continue }
-        if (quota.n >= Number(cfg.dmReplyPerDay)) { log('私信监听：今天的回复额度用完了（' + quota.n + '）⇒ 这条先不回'); continue }
+        // ⭐ 只读不回 / 额度用完：**这条就不再看了**（记 seen）—— 免得每一跳都刷一行日志
+        if (Number(cfg.dmReplyPerDay) === 0) { markDmSeen(s.uid, last.key); log('私信监听：收到新消息（dmReplyPerDay=0 = 只读不回）：' + last.text.slice(0, 40)); continue }
+        if (quota.n >= Number(cfg.dmReplyPerDay)) { markDmSeen(s.uid, last.key); log('私信监听：今天的回复额度用完了（' + quota.n + '）⇒ 这条先不回'); continue }
+        // ⭐ 同一条最多试 DM_TRIES_MAX 次：**回失败的不记 seen**（下一跳会再来），但也不能无限试下去 ✗
+        const tk = s.uid + ':' + last.key
+        const tries = readJson(dmTriesFile, null)
+        const t = (tries && tries.day === today && tries.n && typeof tries.n === 'object') ? tries : { day: today, n: {} }
+        t.n[tk] = Number(t.n[tk] || 0) + 1
+        if (t.n[tk] > DM_TRIES_MAX) {
+          markDmSeen(s.uid, last.key)
+          writeJsonSafe(dmTriesFile, t)
+          log(`私信监听：这条试了 ${DM_TRIES_MAX} 次都没回成 ⇒ 先不回了（原因看上面几行 + duty.log）`)
+          continue
+        }
+        writeJsonSafe(dmTriesFile, t)
         log(`私信监听：收到新消息 —— ${last.text.slice(0, 40)}`)
-        runDmReply(s.uid, last.text)
-        quota.n++
-        writeJsonSafe(dmQuotaFile, quota)
+        const r = runDmReply(s.uid, last.text, last.key)
+        // ⭐ 起不来（比如找不到 dsh）就不占今天的额度
+        if (r?.ok) { quota.n++; writeJsonSafe(dmQuotaFile, quota) }
       }
     } catch (e) {
       log('私信监查出错（已兜住）：' + String(e?.message ?? e))

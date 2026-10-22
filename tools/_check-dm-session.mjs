@@ -7,15 +7,17 @@
  *   · `fetch` 被换掉：只认「会话列表 / 读消息」两个 URL，回一份假数据；
  *   · 私信那一跳的间隔用 `BILI_DUTY_DM_TICK_SEC=1` 压成 1 秒（那个环境变量只为这种预检存在）。
  *
- * 验的六件事：
+ * 验的八件事：
  *   ① 值班轮**不带** `--session-id`、也不碰 dm-session.json（上一版的 sessionMode 确实撤掉了）
  *   ② 第一条私信：新开一条，跑完把 id + 「回给谁」记进 dm-session.json
  *   ③ 第二条私信（还是同一个人）：**续在同一条**上，且桶里**不多**一条会话
  *   ④ 换了回给谁：另开一条，不把上一个人的聊天记录带进新对话
  *   ⑤ 记的那条被删掉：下一跳重新开一条并改记新 id（自愈）
  *   ⑥ 私信回复还在跑：值班轮被挡住（`started:false`）—— 两条同时写一个会话会撞 `session.lock`
+ *   ⑦ 那条会话**正被别的进程写着**（= 你在 GUI 里打开/改过它）：改用**新会话**立刻重来一次，不漏回
+ *   ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才记成"已回"并放弃
  *
- * 用法：`node tools/_check-dm-session.mjs`（约 15 秒；退出码 0 = 全过）
+ * 用法：`node tools/_check-dm-session.mjs`（约 25 秒；退出码 0 = 全过）
  */
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -27,19 +29,23 @@ const STATE = join(HOME, 'bili-duty')
 const BUCKET_DIR = join(HOME, 'sessions', '--' + STATE.replace(/^\//, '').replace(/\//g, '-') + '--')
 const FAKE = join(HOME, 'fake-dsh.mjs')
 const FAKE_LOG = join(HOME, 'fake-dsh.log')
-const SLOW_FLAG = join(HOME, 'slow')
+const SLOW_FLAG = join(HOME, 'slow')        // 内容 = 毫秒：让这一轮慢下来（验"值班轮让路"）
+const LOCKED_FLAG = join(HOME, 'locked')    // 存在 = 那条会话正被别的进程写着（模拟 GUI 打开/改过它）
+const FAIL_FLAG = join(HOME, 'fail')        // 存在 = 这一轮怎么都失败（验"失败不记 seen + 试满 3 次才放弃"）
 
 rmSync(HOME, { recursive: true, force: true })
 mkdirSync(STATE, { recursive: true })
 mkdirSync(BUCKET_DIR, { recursive: true })
 
-// ── 假 dsh：只记账 + 建/认会话目录（带 --session-id 时那条必须已经在盘上，否则像 DSH 一样 exit 1）──
+// ── 假 dsh：只记账 + 建/认会话目录（带 --session-id 时那条必须已经在盘上、而且没被别人锁着，否则像 DSH 一样 exit 1）──
 writeFileSync(FAKE, `
 import { mkdirSync, appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 const LOG = ${JSON.stringify(FAKE_LOG)}
 const BUCKET = ${JSON.stringify(BUCKET_DIR)}
 const SLOW = ${JSON.stringify(SLOW_FLAG)}
+const LOCKED = ${JSON.stringify(LOCKED_FLAG)}
+const FAIL = ${JSON.stringify(FAIL_FLAG)}
 const argv = process.argv.slice(2)
 const say = (o) => appendFileSync(LOG, JSON.stringify({
   ...o,
@@ -48,10 +54,12 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
 }) + '\\n')
 say({ begin: true })
 if (existsSync(SLOW)) await new Promise((r) => setTimeout(r, Number(readFileSync(SLOW, 'utf8')) || 3000))
+if (existsSync(FAIL)) { say({ failed: true }); console.error('dsh: boom'); process.exit(1) }
 const i = argv.indexOf('--session-id')
 if (i >= 0) {
   const want = argv[i + 1]
   if (!existsSync(join(BUCKET, want))) { say({ adoptMissing: want }); process.exit(1) }
+  if (existsSync(LOCKED)) { say({ locked: want }); console.error('dsh: session "' + want + '" is already owned by an active write handle'); process.exit(1) }
   say({ adopted: want }); process.exit(0)
 }
 const id = 'session-fake-' + Date.now().toString(16) + '-' + Math.random().toString(16).slice(2, 6)
@@ -176,6 +184,36 @@ try {
   await until(() => dmRuns().length > done, 8000, '慢的那条私信结束')
   const r6b = await POST('/api/bili-duty/run', { mode: 'A' })
   check(r6b.started === true, '私信跑完之后值班轮又能起了', JSON.stringify(r6b.started))
+
+  /* ⑦ 那条会话正被别的进程写着（= 你在 GUI 里打开/改过它）⇒ 改用新会话重来一次，不能漏回 */
+  await POST('/api/bili-duty/config', { dmReplyPerDay: 20, dmOwnerUid: 42 })   // 回给 42 + 后面还要试好多次
+  talkerUid = 42
+  const lockedId = 'session-fake-locked-1'
+  mkdirSync(join(BUCKET_DIR, lockedId), { recursive: true })
+  writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({ sessionId: lockedId, ownerUid: 42 }))
+  writeFileSync(LOCKED_FLAG, '1')
+  const done6 = dmRuns().length
+  nextKey = 'k6'
+  await until(() => dmRuns().length >= done6 + 2, 10000, '锁住的那条 + 重来的那条')
+  const locked = dmRuns()[done6] || { short: [] }
+  const retried = dmRuns()[done6 + 1] || { short: [] }
+  check(locked.short.includes('--session-id') && locked.locked === lockedId, '第一条：想续那条被别人锁着的会话 ⇒ 失败')
+  check(!retried.short.includes('--session-id') && !!retried.created, '紧接着**改用新会话重来一次**（没漏回）')
+  check((dmRec() || {}).sessionId === retried.created, '改记了新会话 id', String((dmRec() || {}).sessionId || ''))
+  check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k6', '重来回成之后才把这条记成"已回"')
+  check(/改用新会话重来一次/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), '日志里明说为什么重来')
+  rmSync(LOCKED_FLAG, { force: true })
+
+  /* ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才放弃 */
+  writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({}))   // 别让它走"续会话"那条路，专心验重试
+  writeFileSync(FAIL_FLAG, '1')
+  const done7 = dmRuns().length
+  nextKey = 'k7'
+  await until(() => /试了 3 次都没回成/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), 15000, '试满 3 次')
+  const failed = dmRuns().slice(done7).filter((l) => l.failed)
+  check(failed.length === 3, '回不成的消息一共试了 3 次（不是一次就丢）', String(failed.length) + ' 次')
+  check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k7', '试满 3 次才把它记成"已回"，不再刷')
+  rmSync(FAIL_FLAG, { force: true })
 } catch (e) {
   console.error('✗ 预检自己出错：' + (e?.stack || e))
   bad += 1
