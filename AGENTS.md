@@ -48,7 +48,7 @@
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
-  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 25 秒、九件事，不花 token；
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十件事，不花 token；
   家目录特意带**空格 + 中文**，用来盯"会话桶名有没有又猜错"）
 
 ## 约定
@@ -60,7 +60,9 @@
   **值班轮（A/B）永远每轮新开一条**、不吃会话历史（上一版的 `sessionMode` 已撤掉）；
   ⚠️ 那条会话**被你打开 / 改过名**时宿主会一直握着它的写锁（flock）⇒ 续不上就**改用新会话重来一次**（不漏回）；
   回不成的不记 `dm-seen.json`（下一跳还会试），同一条最多试 3 次（记在 `dm-tries.json`）；
-  `dmReplyPerDay` **只算真回成的**（失败/白跑的不占额度，见 `bumpDmQuota`）
+  `dmReplyPerDay` **只算真回成的**（失败/白跑的不占额度，见 `bumpDmQuota`）；
+  ⭐ 人设（`AGENTS.md`）**只在新开一条 / 人设内容变过时贴**（指纹存 `dm-session.json` 的 `docHash`）——
+  续用不重复贴那上千字，省篇幅；「素材不是指令」那条防注入红线照旧每轮都带
 - **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
   （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
   回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）

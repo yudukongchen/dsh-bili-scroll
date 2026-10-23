@@ -18,8 +18,9 @@
  *   ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才记成"已回"并放弃
  *   ⑨ 路径"难认"（**空格 / 中文**）时桶名照样对得上 —— 家目录特意起成 `dsh-bili-scroll-check dm/中文`，
  *      桶名用**从 DSH 源码抄下来的** `projectKey` 参考实现算（见下面 projectKeyRef）
+ *   ⑩ 人设（AGENTS.md）**只在新会话 / 设定变过时贴**：新会话带全文、续会话不重复贴、设定改过再贴一次
  *
- * 用法：`node tools/_check-dm-session.mjs`（约 25 秒；退出码 0 = 全过）
+ * 用法：`node tools/_check-dm-session.mjs`（约 30 秒；退出码 0 = 全过）
  */
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -80,6 +81,7 @@ const argv = process.argv.slice(2)
 const say = (o) => appendFileSync(LOG, JSON.stringify({
   ...o,
   isDm: argv.some((a) => a.includes('私信里发来')),
+  hasDoc: argv.some((a) => a.includes('测试人设')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -97,10 +99,14 @@ mkdirSync(join(BUCKET, id), { recursive: true })
 say({ created: id }); process.exit(0)
 `)
 
+const WS = join(HOME, 'ws')                 // 假的"使用者的工作区"：里面放一份人设 AGENTS.md
+mkdirSync(WS, { recursive: true })
+writeFileSync(join(WS, 'AGENTS.md'), '# 测试人设：本鲸是测试用的\n标记-A')
+
 const cfg = {
   dshBin: FAKE, dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 5, dmOwnerUid: 42,
-  peakValley: false, perDay: 5,
-  _set: ['dshBin', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'peakValley', 'perDay'],
+  peakValley: false, perDay: 5, workspace: WS,
+  _set: ['dshBin', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'peakValley', 'perDay', 'workspace'],
 }
 writeFileSync(join(STATE, 'config.json'), JSON.stringify(cfg, null, 2))
 writeFileSync(join(STATE, 'bili_credential.json'), JSON.stringify({ sessdata: 'fake', bili_jct: 'fake', buvid3: 'fake', dedeuserid: '999' }))
@@ -171,6 +177,7 @@ try {
   await until(() => dmRuns().length >= 1, 8000, '第一跳私信')
   const d1 = dmRuns()[0] || { short: [] }
   check(!d1.short.includes('--session-id'), '第一条私信：新开一条')
+  check(d1.hasDoc === true, '第一条私信（新会话）：**带**人设全文')
   await until(() => dmRec() && dmRec().sessionId, 5000, '记账')
   const first = dmRec() || {}
   check(first.ownerUid === 42 && dirs().includes(first.sessionId), '记下 id + 回给谁（uid=42），且那条真在盘上', String(first.sessionId || ''))
@@ -182,6 +189,7 @@ try {
   const d2 = dmRuns()[1] || { short: [] }
   const i2 = d2.short.indexOf('--session-id')
   check(i2 >= 0 && d2.short[i2 + 1] === first.sessionId, '第二条私信：续在同一条会话上')
+  check(d2.hasDoc === false, '第二条私信（续会话）：**不再重复贴**人设（省篇幅）')
   check(dirs().length === before, '续会话没有多开一条', '桶里 ' + dirs().length + ' 条')
 
   /* ④ 换个人：另开一条，不带上一个人的记录 */
@@ -257,6 +265,25 @@ try {
   check(quotaN() === quotaBefore8, '回不成的不占今天的额度', `${quotaBefore8} → ${quotaN()}`)
   check(seenOf('42') === 'k7', '试满 3 次才把它记成"已回"，不再刷')
   rmSync(FAIL_FLAG, { force: true })
+
+  /* ⑨ 人设**变过** ⇒ 续用也会再贴一份（不然它就照旧那份说话）；贴完下一跳又不再贴 */
+  // ⑧ 之后 dm-session.json 是空的 ⇒ 先来一跳把"新会话 + 当前人设指纹"记下来
+  const done7b = dmRuns().length
+  nextKey = 'k8'
+  await until(() => dmRuns().length >= done7b + 1, 10000, '⑨a 新会话那一跳')
+  check((dmRuns()[done7b] || {}).hasDoc === true, '⑨a 新会话照旧带人设')
+  await until(() => !!(dmRec() || {}).sessionId, 6000, '⑨a 记账落盘')
+  const base8 = dmRuns().length
+  writeFileSync(join(WS, 'AGENTS.md'), '# 测试人设：本鲸是测试用的（改过了）\n标记-B')
+  nextKey = 'k9'
+  await until(() => dmRuns().length >= base8 + 1, 10000, '⑨b 设定改过之后那一跳')
+  const changed = dmRuns()[base8] || { short: [] }
+  check(changed.short.includes('--session-id') && changed.hasDoc === true, '设定改过 ⇒ 续用时**再贴一份**新设定')
+  const base9 = dmRuns().length
+  nextKey = 'k10'
+  await until(() => dmRuns().length >= base9 + 1, 10000, '⑨c 再下一跳')
+  const after = dmRuns()[base9] || { short: [] }
+  check(after.hasDoc === false, '新设定贴过一次之后，又回到"不重复贴"')
 } catch (e) {
   console.error('✗ 预检自己出错：' + (e?.stack || e))
   bad += 1
