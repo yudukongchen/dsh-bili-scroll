@@ -82,6 +82,7 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
   ...o,
   isDm: argv.some((a) => a.includes('私信里发来')),
   hasDoc: argv.some((a) => a.includes('测试人设')),
+  hasHist: argv.some((a) => a.includes('最近的几句私信')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -124,7 +125,13 @@ globalThis.fetch = async (url) => {
     return json({ code: 0, data: { session_list: [{ talker_id: talkerUid, unread_count: 1, last_msg: { content: JSON.stringify({ content: '在吗' }), timestamp: 1 } }] } })
   }
   if (u.includes('fetch_session_msgs')) {
-    return json({ code: 0, data: { messages: [{ msg_type: 1, content: JSON.stringify({ content: '问一句' }), msg_key: nextKey || 'seen-k', timestamp: 1, sender_uid: talkerUid }] } })
+    // ⚠️ B站 这个接口是**倒序**的（新的在前）—— lib/dm.mjs 会 reverse 一遍
+    // 当前这一句 + 两句旧的（当前这句在提示词正文里，会被去重掉）
+    return json({ code: 0, data: { messages: [
+      { msg_type: 1, content: JSON.stringify({ content: '问一句' }), msg_key: nextKey || 'seen-k', timestamp: 3, sender_uid: talkerUid },
+      { msg_type: 1, content: JSON.stringify({ content: '上一句的回复' }), msg_key: 'h-old-2', timestamp: 2, sender_uid: 999 },
+      { msg_type: 1, content: JSON.stringify({ content: '上一句：鲸鲸在吗' }), msg_key: 'h-old-1', timestamp: 1, sender_uid: talkerUid },
+    ] } })
   }
   throw new Error('预检里不该访问：' + u.slice(0, 80))
 }
@@ -178,6 +185,7 @@ try {
   const d1 = dmRuns()[0] || { short: [] }
   check(!d1.short.includes('--session-id'), '第一条私信：新开一条')
   check(d1.hasDoc === true, '第一条私信（新会话）：**带**人设全文')
+  check(d1.hasHist === true, '第一条私信（新会话）：**带**最近几句私信（接得上话）')
   await until(() => dmRec() && dmRec().sessionId, 5000, '记账')
   const first = dmRec() || {}
   check(first.ownerUid === 42 && dirs().includes(first.sessionId), '记下 id + 回给谁（uid=42），且那条真在盘上', String(first.sessionId || ''))
@@ -190,6 +198,7 @@ try {
   const i2 = d2.short.indexOf('--session-id')
   check(i2 >= 0 && d2.short[i2 + 1] === first.sessionId, '第二条私信：续在同一条会话上')
   check(d2.hasDoc === false, '第二条私信（续会话）：**不再重复贴**人设（省篇幅）')
+  check(d2.hasHist === false, '第二条私信（续会话）：也不必再贴最近几句（历史里连着）')
   check(dirs().length === before, '续会话没有多开一条', '桶里 ' + dirs().length + ' 条')
 
   /* ④ 换个人：另开一条，不带上一个人的记录 */
@@ -243,6 +252,7 @@ try {
   const retried = dmRuns()[done6 + 1] || { short: [] }
   check(locked.short.includes('--session-id') && locked.locked === lockedId, '第一条：想续那条被别人锁着的会话 ⇒ 失败')
   check(!retried.short.includes('--session-id') && !!retried.created, '紧接着**改用新会话重来一次**（没漏回）')
+  check(retried.hasHist === true, '重来的那一跳**带上最近几句私信**（续不上也不失忆）')
   /* ⚠️ 记账 / 记 seen / 记额度都是**子进程退出之后**才做的 ⇒ 等它落盘再断言，别跟它抢（第一版就是抢输才红的） */
   await until(() => (dmRec() || {}).sessionId === retried.created, 6000, '⑦ 记账落盘')
   check((dmRec() || {}).sessionId === retried.created, '改记了新会话 id', String((dmRec() || {}).sessionId || ''))
