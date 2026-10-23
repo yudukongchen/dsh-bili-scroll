@@ -1,3 +1,38 @@
+## fork 增量 · 2026-10-23（0.1.25：会话桶名 / dsh 定位 —— 不再自己猜 DSH 的规则）
+
+> 起因：主人问"DSH 最新 0.2.1-rc.2 好像移除了 cwd，扫一下配置里的硬编码"。
+> 先给结论：**这个版本的 cwd 没有被移除** —— headless 里仍是 `fs.resolve('.')` / `process.cwd()`，
+> 会话仍按 cwd 分桶，`--session-id` adopt 时还拿"记录里的 cwd"跟当前 cwd 对比。
+> 真跟"没有 cwd"沾边的只有一条：cwd **拿不到**时会落到 `<会话根>/_no-cwd/`，
+> 而那种会话**根本不能被 adopt**（`session "…" recorded no working directory, so it cannot be adopted`）。
+> 不过顺着这条线扫下去，**我们自己的硬编码确实有一处会咬人** ⇒ 这次修掉。
+
+**修**
+
+- 🔴 **会话桶名改成照抄 DSH 的 `projectKey(cwd)`**（`@deepseek-ai/dsh-session-persistence-jsonl`，
+  0.2.1-rc.2 那份）。老实现是自己猜的（只把 `/` `\` 换成 `-`）—— 在本机那种纯 ASCII 路径上**碰巧**对，
+  但**空格 / 中文 / `~` / Windows 的 `C:\` / 超长路径 / `//` 重复分隔符 / 根目录 `/`** 全对不上
+  （跟 DSH 源码逐条对比：9 种路径里 **7 种错**）⇒ 那些机器上"私信续会话"会**静默退化成每条新开** ✗。
+  现在逐行照搬：分隔符（含 `:`）**连续只算一个** `-`；非 `[A-Za-z0-9._-]` 的每个字符编成 `~XXXX`；
+  掐掉开头的 `-`（空了用 `root`）、截到 251 字、包成 `--…--`。**老猜法留一份当保底**。
+  回归预检特意把家目录起成带空格 + 中文，桶名用"从 DSH 源码抄下来的参考实现"算 ⇒ 再猜错就当场红。
+- 🟡 **会话根**不再只看 `dirname(插件家)/sessions`：也认 `$DSH_HOME/sessions`，并且**用的时候才算**
+  （装完插件那一刻 `sessions/` 可能还没建出来）。
+- 🟡 **dsh CLI 的定位**：以前主要靠几个写死的绝对路径（`/usr/lib/node_modules/…`、`%APPDATA%\npm\…`）。
+  现在**先看"我们自己挂在哪个 CLI 上"**（`process.argv[1]`，即 `/usr/bin/dsh` 或 `…/dsh/lib/bin.js` 那种），
+  写死的那几个降级成保底 —— npm -g / pnpm / npx / 桌面版换了安装位置都不怕 ✓
+  （⚠️ 只认"路径里有 `dsh` 目录且叫 `bin.js`"或者"就叫 `dsh`"的入口，免得把桌面版 Electron 主进程当 CLI 起 ✗）
+- 🟡 桶名对不上时**明说一次**（`⚠️ 认不出会话桶：…`）—— 不再让"续会话"静默变成"每条新开"。
+- 🟡 新增版本漂移体检：overlay 里那句 `@deepseek-ai/dsh-mcp-client` 是 **DSH 的内部名字**，
+  找不到就记一行警告（那种情况下那一轮会没有 `bili_*` 工具），但**不拦着跑** ✓
+
+**还是写死、但已经"坏就出声"的**（这次没改）：overlay 里 `credentials` / `authorization` /
+`deepseek-account` / `agent-default-model` 四个内部 id（DSH 改名 ⇒ 未知条目被当无事发生 ⇒
+那一轮以 `MISSING_CREDENTIAL` / `ACCOUNT_SIGN_IN_REQUIRED` 失败，duty.log 里看得见）、
+`headlessProfile` 默认 `headless`（profile 改名 ⇒ 那一轮起不来，日志里会说找不到）、
+以及 `prompts/duty.md` 里"看一眼当前工作目录里的 `AGENTS.md`"这类**相对路径**
+（人设已经内联进提示词、报告路径也一直是绝对路径 ⇒ cwd 真变了也不会写错地方，最多是读不到那句）。
+
 ## fork 增量 · 2026-10-22（0.1.24：额度只算「真回成的」）
 
 接着 0.1.23：那次续会话白跑（`already owned by an active write handle`）**把当天的一条额度也吃掉了** ——

@@ -16,6 +16,8 @@
  *   ⑥ 私信回复还在跑：值班轮被挡住（`started:false`）—— 两条同时写一个会话会撞 `session.lock`
  *   ⑦ 那条会话**正被别的进程写着**（= 你在 GUI 里打开/改过它）：改用**新会话**立刻重来一次，不漏回
  *   ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才记成"已回"并放弃
+ *   ⑨ 路径"难认"（**空格 / 中文**）时桶名照样对得上 —— 家目录特意起成 `dsh-bili-scroll-check dm/中文`，
+ *      桶名用**从 DSH 源码抄下来的** `projectKey` 参考实现算（见下面 projectKeyRef）
  *
  * 用法：`node tools/_check-dm-session.mjs`（约 25 秒；退出码 0 = 全过）
  */
@@ -24,9 +26,37 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import http from 'node:http'
 
-const HOME = join(tmpdir(), 'dsh-bili-scroll-check-dm')
+/**
+ * ⭐ 参考实现：**照抄 DSH 自己的** `projectKey(cwd)`
+ *   （`@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js`，0.2.1-rc.2）。
+ *   用它算出"会话桶目录" ⇒ 插件要是又自己猜桶名（比如只把 `/` 换成 `-`），
+ *   这个预检里的家目录（带空格 + 中文）就会让它**对不上**、当场红 ✗
+ */
+const projectKeyRef = (cwd) => {
+  const s = String(cwd || '')
+  if (!s) throw new Error('cannot encode an empty project path')
+  let readable = ''
+  let separatorRun = false
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-'
+      separatorRun = true
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch
+      separatorRun = false
+    } else {
+      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+      separatorRun = false
+    }
+  }
+  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+}
+
+const HOME = join(tmpdir(), 'dsh-bili-scroll-check dm', '中文')   // ⭐ 故意带空格 + 中文
 const STATE = join(HOME, 'bili-duty')
-const BUCKET_DIR = join(HOME, 'sessions', '--' + STATE.replace(/^\//, '').replace(/\//g, '-') + '--')
+const BUCKET_DIR = join(HOME, 'sessions', projectKeyRef(STATE))
 const FAKE = join(HOME, 'fake-dsh.mjs')
 const FAKE_LOG = join(HOME, 'fake-dsh.log')
 const SLOW_FLAG = join(HOME, 'slow')        // 内容 = 毫秒：让这一轮慢下来（验"值班轮让路"）
@@ -117,8 +147,12 @@ const logLines = () => (existsSync(FAKE_LOG) ? readFileSync(FAKE_LOG, 'utf8').tr
 const dmRuns = () => logLines().filter((l) => l.isDm && !l.begin)          // 私信那一条的收尾行
 const dmBegins = () => logLines().filter((l) => l.isDm && l.begin)
 const dmRec = () => { try { return JSON.parse(readFileSync(join(STATE, 'dm-session.json'), 'utf8')) } catch { return null } }
+const seenOf = (uid) => { try { return (JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8')) || {})[String(uid)] } catch { return undefined } }
+const quotaN = () => { try { return Number((JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n) || 0 } catch { return 0 } }
 const dirs = () => { try { return readdirSync(BUCKET_DIR).filter((n) => n.startsWith('session-')).sort() } catch { return [] } }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/** 等"没有刚跑完还没记完账的轮次"：静 1.5 秒（> 1 秒那一跳）再往下走 */
+const settle = async () => { const n = dmRuns().length; await sleep(1500); return dmRuns().length === n }
 let bad = 0
 const check = (ok, label, extra) => { console.log((ok ? '✓ ' : '✗ ') + label + (extra ? '  ' + extra : '')); if (!ok) bad += 1 }
 const until = async (fn, ms, label) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn()) return true; await sleep(200) } console.log('… 等超时：' + label); return false }
@@ -186,6 +220,7 @@ try {
   check(r6b.started === true, '私信跑完之后值班轮又能起了', JSON.stringify(r6b.started))
 
   /* ⑦ 那条会话正被别的进程写着（= 你在 GUI 里打开/改过它）⇒ 改用新会话重来一次，不能漏回 */
+  await settle()
   await POST('/api/bili-duty/config', { dmReplyPerDay: 20, dmOwnerUid: 42 })   // 回给 42 + 后面还要试好多次
   talkerUid = 42
   const lockedId = 'session-fake-locked-1'
@@ -193,32 +228,34 @@ try {
   writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({ sessionId: lockedId, ownerUid: 42 }))
   writeFileSync(LOCKED_FLAG, '1')
   const done6 = dmRuns().length
-  const quotaBefore7 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
+  const quotaBefore7 = quotaN()
   nextKey = 'k6'
-  await until(() => dmRuns().length >= done6 + 2, 10000, '锁住的那条 + 重来的那条')
+  await until(() => dmRuns().length >= done6 + 2, 12000, '锁住的那条 + 重来的那条')
   const locked = dmRuns()[done6] || { short: [] }
   const retried = dmRuns()[done6 + 1] || { short: [] }
   check(locked.short.includes('--session-id') && locked.locked === lockedId, '第一条：想续那条被别人锁着的会话 ⇒ 失败')
   check(!retried.short.includes('--session-id') && !!retried.created, '紧接着**改用新会话重来一次**（没漏回）')
+  /* ⚠️ 记账 / 记 seen / 记额度都是**子进程退出之后**才做的 ⇒ 等它落盘再断言，别跟它抢（第一版就是抢输才红的） */
+  await until(() => (dmRec() || {}).sessionId === retried.created, 6000, '⑦ 记账落盘')
   check((dmRec() || {}).sessionId === retried.created, '改记了新会话 id', String((dmRec() || {}).sessionId || ''))
-  check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k6', '重来回成之后才把这条记成"已回"')
+  await until(() => seenOf('42') === 'k6' && quotaN() === quotaBefore7 + 1, 6000, '⑦ seen/额度落盘')
+  check(seenOf('42') === 'k6', '重来回成之后才把这条记成"已回"')
+  check(quotaN() === quotaBefore7 + 1, '这一次（含那次白跑的续会话）只占 1 条额度', `${quotaBefore7} → ${quotaN()}`)
   check(/改用新会话重来一次/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), '日志里明说为什么重来')
-  const quota7 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
-  check(quota7 === quotaBefore7 + 1, '这一次（含那次白跑的续会话）只占 1 条额度', `${quotaBefore7} → ${quota7}`)
   rmSync(LOCKED_FLAG, { force: true })
 
   /* ⑧ 怎么都回不成：**不记 seen**（下一跳还会试），试满 3 次才放弃 */
+  await settle()
   writeFileSync(join(STATE, 'dm-session.json'), JSON.stringify({}))   // 别让它走"续会话"那条路，专心验重试
   writeFileSync(FAIL_FLAG, '1')
   const done7 = dmRuns().length
-  const quotaBefore8 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
+  const quotaBefore8 = quotaN()
   nextKey = 'k7'
-  await until(() => /试了 3 次都没回成/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), 15000, '试满 3 次')
+  await until(() => /试了 3 次都没回成/.test(readFileSync(join(STATE, 'duty.log'), 'utf8')), 20000, '试满 3 次')
   const failed = dmRuns().slice(done7).filter((l) => l.failed)
   check(failed.length === 3, '回不成的消息一共试了 3 次（不是一次就丢）', String(failed.length) + ' 次')
-  const quota8 = (JSON.parse(readFileSync(join(STATE, 'dm-quota.json'), 'utf8')) || {}).n || 0
-  check(quota8 === quotaBefore8, '回不成的不占今天的额度', `${quotaBefore8} → ${quota8}`)
-  check(JSON.parse(readFileSync(join(STATE, 'dm-seen.json'), 'utf8'))['42'] === 'k7', '试满 3 次才把它记成"已回"，不再刷')
+  check(quotaN() === quotaBefore8, '回不成的不占今天的额度', `${quotaBefore8} → ${quotaN()}`)
+  check(seenOf('42') === 'k7', '试满 3 次才把它记成"已回"，不再刷')
   rmSync(FAIL_FLAG, { force: true })
 } catch (e) {
   console.error('✗ 预检自己出错：' + (e?.stack || e))

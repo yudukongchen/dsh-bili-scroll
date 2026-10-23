@@ -48,7 +48,8 @@
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
-  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 25 秒、八件事，不花 token）
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 25 秒、九件事，不花 token；
+  家目录特意带**空格 + 中文**，用来盯"会话桶名有没有又猜错"）
 
 ## 约定
 
@@ -63,5 +64,10 @@
 - **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
   （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
   回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）
+- ⚠️ **别自己猜 DSH 的目录 / 定位规则**（2026-10-23 的教训）：会话桶名是 DSH 的 `projectKey(cwd)`
+  （分隔符 `/\:` 连续只算一个 `-`，其余字符编成 `~XXXX`，截 251 字，包 `--…--`）—— `index.js` 里那份是
+  **照 0.2.1-rc.2 逐行抄的**，改 DSH 版本时对照 `@deepseek-ai/dsh-session-persistence-jsonl` 重新核一遍；
+  认不出来会记一行「⚠️ 认不出会话桶」再退回"每条新开"（不静默）。dsh CLI 也先看 `process.argv[1]`
+  （我们自己挂在哪个 CLI 上），写死的绝对路径只是保底
 - **一轮 = 任务 A 或任务 B**：A 搜+挑+发 1 条评论写报告；B 从「挑中但还没 @ 的」里补 @ 一个 +
   回复评论（每时段 A 完再跑 max(待@数,1) 轮 B，轮间隔 5 分钟、单轮 ≤20 分钟）

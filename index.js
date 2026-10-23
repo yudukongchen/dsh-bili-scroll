@@ -14,7 +14,7 @@
  * 这样凭证 `bili_credential.json` 落在家里而不是插件包里）/ `duty.md` / `out/` / `duty.log`。
  * ============================================================================
  */
-import { loadHostDeps } from './lib/hostdeps.mjs'
+import { loadHostDeps, candidateRoots } from './lib/hostdeps.mjs'
 
 // ⭐ 这两样从**宿主那棵树**里取（拿不到就退到自己的依赖；再拿不到，defineTool 用本地等价实现）。
 //    起因（2026-10-16 用户递来的完整报告 + 本机复现）：它们是 optional peer，
@@ -804,14 +804,24 @@ export function apply(ctx, config) {
     // ① 用户显式填的
     const explicit = String(cfg.dshBin || '').trim()
     if (explicit && existsSync(explicit)) return explicit
-    // ② 让 Node 的解析器替我们找（web profile / 桌面版 app 目录，两条路都可能命中）
+    /* ② ⭐ 2026-10-23：**我们自己就是挂在 dsh 上跑的** ⇒ 宿主那个 CLI 的路径最准，也最不怕
+     *    DSH 换安装位置 / 换包管理器（npm -g、桌面版、pnpm、npx 缓存…）。
+     *    `node /usr/bin/dsh web` 这种：argv[1] = /usr/bin/dsh（软链到 lib/bin.js）✓
+     *    ⚠️ 只认"看着就像 dsh CLI"的入口：路径里有 `dsh` 这个目录名且叫 `bin.js`，或者干脆就叫 `dsh`。
+     *      桌面版 Electron 主进程那种入口（…/main.js）不认 —— 免得把整个应用当 CLI 起一次 ✗ */
+    try {
+      const argv1 = String(process.argv[1] || '')
+      const looksLikeDsh = /(^|[\\/])dsh$/.test(argv1) || (/[\\/]dsh[\\/]/.test(argv1) && /[\\/]bin\.js$/.test(argv1))
+      if (argv1 && looksLikeDsh && existsSync(argv1)) return argv1
+    } catch { /* 拿不到就往下走 */ }
+    // ③ 让 Node 的解析器替我们找（web profile / 桌面版 app 目录，两条路都可能命中）
     try {
       const req = createRequire(import.meta.url)
       for (const spec of ['@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh']) {
         try { const p = req.resolve(spec); if (p && existsSync(p)) return p } catch { /* 换下一个 */ }
       }
     } catch { /* 解析器不可用就跳过 */ }
-    // ③ npm 全局 / POSIX 常见位置
+    // ④ npm 全局 / POSIX 常见位置（老规矩，留着当保底）
     for (const g of [
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       join(process.env.ProgramFiles || '', 'nodejs', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
@@ -1080,7 +1090,24 @@ export function apply(ctx, config) {
     return list
   }
 
+  /**
+   * ⭐ 版本漂移体检（一次就够）：overlay 里那句 `@deepseek-ai/dsh-mcp-client` 是 **DSH 的内部名字** ——
+   *   哪天 DSH 改名 / 搬家，overlay 就会插进一个空条目 ⇒ 那一轮**没有 bili_\* 工具**（它会说手里没工具用）。
+   *   这里只体检 + 记一行日志，**不拦着跑**（拿不到就算了，别把"体检失败"变成"跑不了" ✗）。
+   */
+  let mcpPkgChecked = false
+  const checkMcpPkgOnce = () => {
+    if (mcpPkgChecked) return
+    mcpPkgChecked = true
+    try {
+      const hit = candidateRoots().some((r) => { try { return existsSync(join(r, 'dsh-mcp-client', 'package.json')) } catch { return false } })
+      if (!hit) log('⚠️ 没找到 @deepseek-ai/dsh-mcp-client —— overlay 里那条 MCP 可能插不进那一轮'
+        + '（DSH 换了内部名字 / 位置？）；插件照常跑，只是那一轮可能没有 bili_* 工具')
+    } catch { /* 体检失败不当真 */ }
+  }
+
   const ensureOverlay = () => {
+    checkMcpPkgOnce()
     const file = join(stateDir, 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
@@ -1266,26 +1293,78 @@ export function apply(ctx, config) {
 
   /* ─────────────── 「私信回复续在同一条会话上」（dmSessionMode=fixed，默认）───────────────
    * DSH 的 headless app 有 `--session-id <id>`：adopt 那条已存在的会话（未知 id 会报错）。
-   * 会话按 cwd 分桶存在 `<DSH 家>/sessions/<桶>/session-<uuid>/`，两处轮次的 cwd 都是插件家，
-   * 而插件家就在 DSH 家里 ⇒ 桶目录 = `dirname(插件家)/sessions` ✓
-   * 取 id 的办法不靠猜桶名（路径可能有 `.`）：**跑之前先拍一张盘上会话 id 的快照，
-   * 跑完多出来的那条就是这一轮的** ⇒ 存进家目录的 `dm-session.json`，下一次私信续它 ✓
+   * 会话按 **cwd** 分桶存在 `<会话根>/<桶>/session-<uuid>/`，两处轮次的 cwd 都是插件家 ⇒ 只能认自家那个桶
+   * （🔴 别的桶里是别的会话 —— 比如你在 GUI 里刚点开的 —— 绝不能被当成"这一轮的"）。
+   * 取 id 的办法：**跑之前先拍一张自家桶里会话 id 的快照，跑完多出来的那条就是这一轮的** ✓
    * ⚠️ 值班轮（A/B）**永远不 adopt**（每轮新开）。这既是"没必要"（它的记忆靠文件），
    *    也是**安全**：`session.lock` 是真 flock，同一个会话被两个进程同时写 ⇒ 后一个直接失败 ✗
    */
-  const sessionsRoot = join(dirname(stateDir), 'sessions')
+  /** 会话根：默认 `<DSH 家>/sessions`（插件家就在 DSH 家里）—— 也认 `DSH_HOME` 指到别处的情况。
+   *  ⚠️ 每次用的时候再算：装完插件那一刻 `sessions/` 可能还没建出来 */
+  const sessionsRootNow = () => {
+    const cands = [join(dirname(stateDir), 'sessions')]
+    try { if (process.env.DSH_HOME) cands.push(join(process.env.DSH_HOME, 'sessions')) } catch { /* 没有就算了 */ }
+    for (const c of cands) { try { if (existsSync(c)) return c } catch { /* 坏路径跳过 */ } }
+    return cands[0]
+  }
+  /**
+   * ⭐⭐ 会话桶名 = **DSH 自己的 `projectKey(cwd)`**（`@deepseek-ai/dsh-session-persistence-jsonl`
+   *    里那份）—— 2026-10-23 照 **0.2.1-rc.2** 的实现**逐行照搬**，不再自己猜：
+   *      · `/` `\` `:` 都算路径分隔符，**连续的只算一个** `-`
+   *      · 只有 `[A-Za-z0-9._-]` 原样保留，**其余每个字符**（空格 / 中文 / `~` …）编成 `~XXXX`（大写十六进制）
+   *      · 掐掉开头的 `-`（掐完为空就用 `root`），最多留 251 个字符，最后包成 `--…--`
+   *    🔴 老实现是自己猜的（只把 `/` `\` 换成 `-`）—— 在本机那种纯 ASCII 路径上**碰巧**对，
+   *      但**路径里有空格 / 中文 / `~`、Windows 的 `C:\`、或者超长**时就永远认不出来 ⇒
+   *      续会话会**静默退化成"每条新开"**（跟 DSH 源码逐条对比实测：9 种路径里 7 种对不上）✗
+   *    ⚠️ 以后 DSH 要是改了这条规则 ⇒ 这里认不出来 ⇒ 只是记不上、退回"每条新开"，不会记错 ✓
+   */
+  const projectKeyOf = (cwd) => {
+    const s = String(cwd || '')
+    if (!s) return ''
+    let readable = ''
+    let sep = false
+    for (let i = 0; i < s.length; i++) {
+      const code = s.charCodeAt(i)
+      const ch = String.fromCharCode(code)
+      if (ch === '/' || ch === '\\' || ch === ':') {
+        if (!sep) readable += '-'
+        sep = true
+      } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+        readable += ch
+        sep = false
+      } else {
+        readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+        sep = false
+      }
+    }
+    return '--' + (readable.replace(/^-+/, '') || 'root').slice(0, 251) + '--'
+  }
   const dmSessionFile = join(stateDir, 'dm-session.json')
-  // ⭐ 桶名 = `--` + 路径去掉开头 `/`、`/` 换成 `-` + `--`（本机实测：
-  //    /home/ubuntu/.dsh/bili-duty → --home-ubuntu-.dsh-bili-duty--，/tmp → --tmp--）
-  //    🔴 **只认插件家自己那个桶**：别的会话（比如 GUI 里刚点开的）绝不能被当成"这一轮的"
-  //    ⚠️ 万一以后 DSH 改了命名规则 ⇒ 这里认不出来 ⇒ 只是记不上、退回"每条新开"，不会记错 ✓
-  const ownBucket = '--' + String(stateDir).replace(/^[/\\]/, '').replace(/[/\\]/g, '-') + '--'
+  // 🔴 **只认插件家自己那个桶**；老猜法留一个当保底（万一哪天 DSH 又改回去）
+  const ownBuckets = [projectKeyOf(stateDir), '--' + String(stateDir).replace(/^[/\\]/, '').replace(/[/\\]/g, '-') + '--']
+    .filter((b, i, a) => b && a.indexOf(b) === i)
+  const ownBucket = ownBuckets[0]
+  const bucketExists = () => ownBuckets.some((b) => { try { return existsSync(join(sessionsRootNow(), b)) } catch { return false } })
+  let bucketWarned = ''
+  /** ⚠️ 桶名对不上（DSH 换了命名规则？）就**明说一次** —— 不然"续会话"会静默变成"每条新开"，没人知道 ✗ */
+  const warnBucketOnce = () => {
+    try {
+      const root = sessionsRootNow()
+      if (!existsSync(root) || bucketExists()) return
+      const sig = root + '|' + ownBuckets.join(',')
+      if (bucketWarned === sig) return
+      bucketWarned = sig
+      log(`⚠️ 认不出会话桶：${root} 下既没有 ${ownBuckets.join(' 也没有 ')} ⇒ 这一次不续会话（每条新开）。`
+        + 'DSH 要是改了会话目录的命名规则，就是这里对不上')
+    } catch { /* 只是提示，别影响记账 */ }
+  }
   const sessionIdsOnDisk = () => {
     const out = new Map()
+    const root = sessionsRootNow()
     try {
-      for (const bucket of readdirSync(sessionsRoot)) {
-        if (bucket !== ownBucket) continue
-        const dir = join(sessionsRoot, bucket)
+      for (const bucket of readdirSync(root)) {
+        if (!ownBuckets.includes(bucket)) continue
+        const dir = join(root, bucket)
         let names = []
         try { names = readdirSync(dir) } catch { continue }
         for (const name of names) {
@@ -1601,6 +1680,8 @@ export function apply(ctx, config) {
       let idsBefore = null
       if (useFixed) {
         const onDisk = sessionIdsOnDisk()
+        // ⚠️ 一条都没看见 ⇒ 可能是"这个桶名认不出来"（DSH 换了命名规则）⇒ 明说一次，别静默降级
+        if (!onDisk.size) warnBucketOnce()
         const saved = opts.freshOnly ? '' : savedDmSessionId(fromUid)
         if (saved && onDisk.has(saved)) {
           usedSessionId = saved
@@ -1672,7 +1753,7 @@ export function apply(ctx, config) {
               const fresh = [...after.entries()].filter(([id]) => !base.has(id)).sort((a, b) => b[1] - a[1])
               if (fresh.length === 1) { saveDmSessionId(fresh[0][0], fromUid); log(`私信续会话：这一条的会话是 ${fresh[0][0]}（回 uid=${fromUid}），下一次续它`) }
               else if (fresh.length) log(`私信续会话：这一跳多出来 ${fresh.length} 条会话（有别的轮次同时在跑？）⇒ 不记，下一次重新认`)
-              else log('私信续会话：没认出这一跳新开的会话 ⇒ 没记上，下一次照旧新开')
+              else { log('私信续会话：没认出这一跳新开的会话 ⇒ 没记上，下一次照旧新开'); warnBucketOnce() }
             } catch (e) { log(`私信续会话记账出错（已兜住）：${e?.message ?? e}`) }
           }
         }
