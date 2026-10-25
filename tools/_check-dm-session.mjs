@@ -86,6 +86,7 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
   hasHist: argv.some((a) => a.includes('最近的几句私信')),
   hasNoAt: argv.some((a) => a.includes('不许 @ 任何人')),
   hasAt: argv.some((a) => a.includes('每条在正文里纯文本 @')),
+  has300: argv.some((a) => a.includes('300 字')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -185,6 +186,7 @@ try {
   check(!duty.short.includes('--session-id'), '值班轮**不带** --session-id（sessionMode 已撤掉）')
   check(duty.hasNoAt === true, '「评论（不 @）+ 私信」那一档：提示词明说**不许 @ 任何人**')
   check(duty.hasAt === false, '那一档里没有"纯文本 @ 要 @ 谁"那套（**不用填「要 @ 谁」**）')
+  check(duty.has300 === true, '评论字数上限是 **300 字**（2026-10-25 从 150 放宽）')
   check(dmRec() === null, '值班轮不碰 dm-session.json')
 
   /* ② 第一条私信：新开 + 记账 */

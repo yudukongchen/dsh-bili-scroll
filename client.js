@@ -504,7 +504,7 @@ window.__ModuleLoader__.load({
               onChange: (e) => setDmUid(e.target.value),
               onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
             }),
-            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
+            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受评论 300 字的限制）'),
             (dmMode === 'both-noat')
               ? h('div', { 'data-bd-note': '' }, '⭐ 这一档 = 公开评论照发（**不 @ 任何人**）+ 另外私信给你：'
                   + '别人看到的是普通观众的留言，你这边收到一条汇总。评论的总开关还是上面那个「自动评论」。')
