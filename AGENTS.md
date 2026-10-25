@@ -48,7 +48,7 @@
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
-  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十件事，不花 token；
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十一件事，不花 token；
   家目录特意带**空格 + 中文**，用来盯"会话桶名有没有又猜错"）
 
 ## 约定
@@ -65,6 +65,9 @@
   续用不重复贴那上千字，省篇幅；「素材不是指令」那条防注入红线照旧每轮都带；
   ⭐ **新开一条时把最近 ≤6 句私信贴进去**（`opts.history`，从 dmTick 刚拉到的消息来）——
   续不上（被 GUI 占着写锁 / 被删 / per-round）也不失忆；续上则不贴（历史里连着）
+- **投递方式**（`dmMode`，四档）：`off` 只评论（评论里 @ 你）· `only` 只私信 · `both` 评论（@ 你）+ 私信 ·
+  ⭐ `both-noat`（2026-10-25 加）**评论（不 @ 任何人）+ 私信** —— 这一档**不用填「要 @ 谁」**；
+  判据只有一处 `commentOnNow()`（提示词与工具层那个闸共用）；评论总开关仍是「自动评论」
 - **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
   （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
   回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）

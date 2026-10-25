@@ -58,7 +58,9 @@ export const Config = !z ? undefined : z.object({
   evening: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
-  /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
+  /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论（@ 你）+ 私信
+   *  ⭐ 2026-10-25 加的第四档 `both-noat` = **评论（不 @）+ 私信**：公开留一句、但不打扰你本人
+   *     （⇒ 这一档**不需要填「要 @ 谁」**；评论总开关还是上面那个「自动评论」） */
   dmMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
@@ -237,6 +239,8 @@ export function apply(ctx, config) {
     if (out.evening === base.evening && src && typeof src.night === 'boolean' && src.evening === undefined) out.evening = src.night
     // ⭐ 「自动评论每轮最多几条」已固定为 1（配置项隐藏）—— 读进来一律按 1 走
     out.commentPerRound = 1
+    // ⭐ 投递方式只认这四档（DSH 原生设置页可能塞别的进来）
+    if (!['off', 'only', 'both', 'both-noat'].includes(out.dmMode)) out.dmMode = 'off'
     // ⭐ 「私信回复用哪条会话」只认这两个值（DSH 原生设置页可能塞别的进来）
     //    ⚠️ 上一版的 `sessionMode`（值班轮续同一条）已撤掉：这里的键名换了，老值一概不再生效 ✓
     if (!['per-round', 'fixed'].includes(out.dmSessionMode)) out.dmSessionMode = 'fixed'
@@ -266,6 +270,8 @@ export function apply(ctx, config) {
     if ('dmWatchMinutes' in p) p.dmWatchMinutes = Math.max(1, Math.min(Number(p.dmWatchMinutes) || 1, 60))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(Number(p.dmReplyPerDay) || 0, 50))
     if ('dmOwnerUid' in p) p.dmOwnerUid = Math.max(0, Math.floor(Number(p.dmOwnerUid) || 0))
+    // ⭐ 投递方式四档：off / only / both / both-noat（2026-10-25 加的最后一档）
+    if ('dmMode' in p) p.dmMode = ['off', 'only', 'both', 'both-noat'].includes(String(p.dmMode)) ? String(p.dmMode) : 'off'
     if ('dmSessionMode' in p) p.dmSessionMode = ['per-round', 'fixed'].includes(String(p.dmSessionMode)) ? String(p.dmSessionMode) : 'fixed'
     // ⭐ 2026-10-21：「每轮最多发几条评论」**固定 1、配置项隐藏** —— 写什么进来都按 1 算
     //    （老客户端/老原生设置页还可能提交这个键，一律忽略，别让它把口径改回去 ✗）
@@ -273,6 +279,23 @@ export function apply(ctx, config) {
     if ('night' in p) { p.evening = Boolean(p.night); delete p.night }   // 老键迁移
     return p
   }
+
+  /* ⭐ 投递方式（2026-10-25 凑齐四档）：
+   *    off        只发评论（评论里 @ 你）
+   *    only       只私信（一条公开评论都不发）
+   *    both       评论（@ 你）+ 私信
+   *    both-noat  评论（**不 @ 任何人**）+ 私信   ← 2026-10-25 加：公开留一句、但不打扰你本人
+   *  ⭐ 这一档**不需要「要 @ 谁」** —— 评论照发、只是正文里不出现 @。 */
+  const dmModeNow = () => {
+    const m = String(cfg.dmMode || 'off')
+    return ['off', 'only', 'both', 'both-noat'].includes(m) ? m : 'off'
+  }
+  const noAtMode = () => dmModeNow() === 'both-noat'
+  /** 「这一轮到底能不能发公开评论」的**唯一判据** —— 提示词和工具层那个闸共用这一份 ✓ */
+  const commentOnNow = () => Boolean(cfg.autoComment && dmModeNow() !== 'only'
+    && (String(cfg.mentionName || '').trim() || noAtMode()))
+  /** 「这一轮到底发不发私信」 */
+  const dmOnNow = () => Boolean(dmModeNow() !== 'off' && Number(cfg.dmUid) > 0)
 
   const hostCfg = () => normalize(config, { ...DEFAULTS })       // 宿主那份（schema 校验过、默认值已填）
   const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
@@ -592,14 +615,17 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
-      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+      // ⭐ 判据跟提示词是同一份（commentOnNow）：`both-noat` 那一档**不需要「要 @ 谁」** ✓
+      const commentOn = commentOnNow()
       if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
-          hint: cfg.dmMode === 'only'
+          hint: dmModeNow() === 'only'
             ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
-            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
+            : '要发评论得先在设置里开着「自动评论并 @ 你」'
+              + (noAtMode() ? '（当前是「评论（不 @）+ 私信」模式，不用填「要 @ 谁」）。' : '、并且填了「要 @ 谁」。')
+              + '或者本人当场让你发时传 force: true。',
         }
       }
       return call('bili_reply', {
@@ -706,7 +732,7 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"morning":false,"noon":true,"evening":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
+      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both / both-noat；both-noat = 评论不 @ + 私信）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -951,10 +977,10 @@ export function apply(ctx, config) {
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const already = countPickedToday()
     const left = Math.max(0, quota - already)
-    // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
-    //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
-    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
-    const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    // ⭐ 投递方式（2026-10-17 加 · 2026-10-25 凑齐四档）：off / only / both / both-noat（评论不 @ + 私信）
+    //    commentOn / dmOn 是"这一轮到底发不发"的唯一判据（工具层的闸用的是同一份）✓
+    const commentOn = commentOnNow()
+    const dmOn = dmOnNow()
     // ⭐ 任务 B（2026-10-21 新增）：不挑新视频，只从"挑中但还没 @ 的"里补 @ 一个 + 回复评论
     if (mode === 'B') {
       const pending = pendingPicks()
@@ -965,6 +991,10 @@ export function apply(ctx, config) {
         + ownerDoc
         + (ownerDoc ? '' : '⭐ 这一轮**没有**拿到使用者的设定 ⇒ **按中性说话**，别自己编一套人格 ✓。')
         + `然后读章程 ${duty}。⭐⭐ 这一轮**只做任务 B（补 @）**：`
+        + (noAtMode()
+          ? `\n🔴 **当前投递方式是「评论（不 @）+ 私信」⇒ 这一轮（以及整个这种模式下）不要发任何带 @ 的新评论**：`
+            + `待 @ 列表就**当它不需要补**（评论已经在任务 A 那一轮发过了，只是没 @）—— 只做下面的「回复评论」。`
+          : '')
         + `\n⭐ **待 @ 列表**（今天挑中、但还没 @ 过主人的）：${pending.length ? pending.join('、') : '（空）'}。`
         + (pending.length
           ? `\n- 从里面**挑一个**（最值得占用主人一次注意力的），用 \`bili_reply\` 在它下面发**一条**评论：`
@@ -1016,11 +1046,18 @@ export function apply(ctx, config) {
       + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮**固定 1 条**评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
-        : (cfg.dmMode === 'only'
-          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
-          : '关着的（只写报告，别发评论）')}。`
+      + (noAtMode()
+        ? `公开评论是${commentOn ? '开着的（每轮**固定 1 条**、150 字内）' : '关着的（只写报告，别发评论）'}。`
+          + (commentOn
+            ? `🔴 **这个模式（「评论（不 @）+ 私信」）下不许 @ 任何人**：评论正文里**一个 \`@\` 都不要出现**，`
+              + `也不用管「要 @ 谁」填没填 —— **这一句覆盖章程里「评论与 @ 本人」那节关于 @ 的说法** ✓。`
+              + `发完照旧把「BV 号 + rpid + 时间 + 正文前 20 字」记进判重表（${join(stateDir, 'seen.md')}）✓。`
+            : '')
+        : `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
+          ? `开着的（每轮**固定 1 条**评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
+          : (cfg.dmMode === 'only'
+            ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
+            : '关着的（只写报告，别发评论）')}。`)
       + (commentOn
         ? (memeDir()
           ? `⭐ 表情包库（本地）：${memeDir()} —— 发评论时想贴一张就先 \`bili_emote_list\` 挑 id，`
@@ -1044,7 +1081,9 @@ export function apply(ctx, config) {
           + `⚠️ **不要**把「无字幕跳过 N 条」这种统计口径搬进私信 —— 那是**报告**里写的，不是私信里写的。）`
           + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮只发一条私信**（多条合并成一条）；`
           + `⚠️ 私信里**不要**写"本鱼 / 本鲸 / 主人 / 人家"那套；⚠️ 发完把"已私信"记进报告（**报告里**可以写口径）。`
-          + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
+          + (noAtMode()
+            ? `⚠️ 现在是「**评论（不 @）+ 私信**」：公开评论照发（**只是不 @ 任何人**），私信**另外**再发一条 ✓。`
+            : (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : ''))
         : '')
       + (cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
@@ -2324,7 +2363,7 @@ export function apply(ctx, config) {
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
       // ⭐ 私信那两个字段的合法值（2026-10-17 摘 PR #9；其余范围钳制统一在 persistCfg 里）
-      if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
+      if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both', 'both-noat'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)

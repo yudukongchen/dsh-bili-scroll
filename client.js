@@ -469,7 +469,7 @@ window.__ModuleLoader__.load({
               }))) : null,
           h(ToggleRow, {
             label: '自动评论并 @ 你',
-            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
+            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人（选「评论（不 @）+ 私信」那一档时就不 @ 了）',
             on: sw('autoComment'),
             onChange: (v) => patch({ autoComment: v }, '自动评论'),
           }),
@@ -484,7 +484,9 @@ window.__ModuleLoader__.load({
               onChange: (e) => setMention(e.target.value),
               onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
             }),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
+            h('div', { 'data-bd-note': '' }, (dmMode === 'both-noat')
+              ? '⭐ 当前是「评论（不 @）+ 私信」⇒ 这里**留空也行**：评论照发，只是正文里不 @ 任何人'
+              : '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
           h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
           h('select', {
             'data-bd-input': '', value: dmMode ?? 'off',
@@ -492,7 +494,8 @@ window.__ModuleLoader__.load({
           },
             h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（默认）'),
             h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
-            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
+            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发（评论里 @ 你）'),
+            h('option', { value: 'both-noat' }, '评论（不 @）+ 私信 —— 公开留一句，但不打扰你本人')),
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字）'),
             h('input', {
@@ -502,6 +505,10 @@ window.__ModuleLoader__.load({
               onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
             }),
             h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
+            (dmMode === 'both-noat')
+              ? h('div', { 'data-bd-note': '' }, '⭐ 这一档 = 公开评论照发（**不 @ 任何人**）+ 另外私信给你：'
+                  + '别人看到的是普通观众的留言，你这边收到一条汇总。评论的总开关还是上面那个「自动评论」。')
+              : null,
             h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
           /* ── 私信双向（2026-10-22 从上游 2.0 并进来）── */
           h(ToggleRow, {

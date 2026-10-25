@@ -19,6 +19,7 @@
  *   ⑨ 路径"难认"（**空格 / 中文**）时桶名照样对得上 —— 家目录特意起成 `dsh-bili-scroll-check dm/中文`，
  *      桶名用**从 DSH 源码抄下来的** `projectKey` 参考实现算（见下面 projectKeyRef）
  *   ⑩ 人设（AGENTS.md）**只在新会话 / 设定变过时贴**：新会话带全文、续会话不重复贴、设定改过再贴一次
+ *   ⑪ 投递方式「**评论（不 @）+ 私信**」那一档：提示词明说"不许 @ 任何人"、也不再要「要 @ 谁」
  *
  * 用法：`node tools/_check-dm-session.mjs`（约 30 秒；退出码 0 = 全过）
  */
@@ -83,6 +84,8 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
   isDm: argv.some((a) => a.includes('私信里发来')),
   hasDoc: argv.some((a) => a.includes('测试人设')),
   hasHist: argv.some((a) => a.includes('最近的几句私信')),
+  hasNoAt: argv.some((a) => a.includes('不许 @ 任何人')),
+  hasAt: argv.some((a) => a.includes('每条在正文里纯文本 @')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -107,7 +110,10 @@ writeFileSync(join(WS, 'AGENTS.md'), '# 测试人设：本鲸是测试用的\n�
 const cfg = {
   dshBin: FAKE, dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 5, dmOwnerUid: 42,
   peakValley: false, perDay: 5, workspace: WS,
-  _set: ['dshBin', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'peakValley', 'perDay', 'workspace'],
+  // ⭐ 投递方式特意选「评论（不 @）+ 私信」，并且**不填「要 @ 谁」** —— 验那一档的提示词
+  dmMode: 'both-noat', autoComment: true, mentionName: '', dmUid: 424242,
+  _set: ['dshBin', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'peakValley', 'perDay', 'workspace',
+    'dmMode', 'autoComment', 'mentionName', 'dmUid'],
 }
 writeFileSync(join(STATE, 'config.json'), JSON.stringify(cfg, null, 2))
 writeFileSync(join(STATE, 'bili_credential.json'), JSON.stringify({ sessdata: 'fake', bili_jct: 'fake', buvid3: 'fake', dedeuserid: '999' }))
@@ -177,6 +183,8 @@ try {
   const duty = logLines()[0] || { short: [] }
   check(r1.started === true, '值班轮起来了', JSON.stringify(r1.started))
   check(!duty.short.includes('--session-id'), '值班轮**不带** --session-id（sessionMode 已撤掉）')
+  check(duty.hasNoAt === true, '「评论（不 @）+ 私信」那一档：提示词明说**不许 @ 任何人**')
+  check(duty.hasAt === false, '那一档里没有"纯文本 @ 要 @ 谁"那套（**不用填「要 @ 谁」**）')
   check(dmRec() === null, '值班轮不碰 dm-session.json')
 
   /* ② 第一条私信：新开 + 记账 */
