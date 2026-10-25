@@ -451,8 +451,9 @@ window.__ModuleLoader__.load({
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '它会不会替你说话'),
           h(ToggleRow, {
-            label: '回复评论（只回楼中楼）',
-            note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
+            label: '回复评论（楼中楼 + 评论里 @ 你的）',
+            note: '默认关；开了之后它会回两种：① 直接回复到你那条评论下面的人；'
+              + '② **在评论里 @ 它的**（含别人楼里的、新评论里的；这一种走 B站 的「@我的」，只回你本人的 @）',
             on: sw('replyToComments'),
             onChange: (v) => patch({ replyToComments: v }, '回复评论'),
           }),

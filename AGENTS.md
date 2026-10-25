@@ -44,11 +44,11 @@
 
 - `index.js` —— host 半端：12 个工具（含 `bili_emote_list` 本地表情包库） + **时段调度器（A/B 队列状态机）** + HTTP 接口 + 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 值班轮的工具白名单（`mcpWhitelist` → `BILI_MCP_TOOLS`）
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
-- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`dm.mjs` + `uid.mjs`（私信双向：读会话/读消息、昵称查 UID）** / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
+- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`dm.mjs` + `uid.mjs`（私信双向：读会话/读消息、昵称查 UID）** / **`atfeed.mjs`（B站 的「@我的」：谁在评论里 @ 了我们）** / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
-  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十一件事，不花 token；
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十二件事、39 项断言，不花 token；
   家目录特意带**空格 + 中文**，用来盯"会话桶名有没有又猜错"）
 
 ## 约定
@@ -69,6 +69,10 @@
 - **投递方式**（`dmMode`，四档）：`off` 只评论（评论里 @ 你）· `only` 只私信 · `both` 评论（@ 你）+ 私信 ·
   ⭐ `both-noat`（2026-10-25 加）**评论（不 @ 任何人）+ 私信** —— 这一档**不用填「要 @ 谁」**；
   判据只有一处 `commentOnNow()`（提示词与工具层那个闸共用）；评论总开关仍是「自动评论」
+- **回复评论**（`replyToComments`，默认关）有**两个来源**：① 直接回到我们那条评论下面的人
+  （`bili_received_replies`）② ⭐ **在评论里 @ 我们的** —— 后者**不在**①那个接口里，由**宿主**读 B站 的
+  「@我的」（`x/msgfeed/at`，`lib/atfeed.mjs`）**在开跑前拉一次**、过滤后直接列进提示词
+  （只留主人本人的、判重表里记过 rpid 的滤掉、最多 5 条）；回法是 `bili_reply(bvid, text, rpid)` ⇒ 楼中楼
 - **私信双向**（0.1.20 从上游 2.0 并进来的**唯一一件**）：宿主每 `dmWatchMinutes` 分钟纯代码看一次私信
   （不花 token），只回「要回谁」本人的**新**消息、每天限 `dmReplyPerDay` 条（**0 = 只读不回**）；
   回复那轮**带人设 + 防注入 + 20 分钟上限**（这三条是本地加固，上游 2.0 没有）

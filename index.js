@@ -34,6 +34,7 @@ import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.
 import { ensureUv } from './lib/uvfetch.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
+import { listAts } from './lib/atfeed.mjs'
 
 export const name = 'bili-scroll'
 export const inject = ['webServer', 'tools', 'settings']
@@ -683,7 +684,7 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       const mode = String(args?.mode ?? '').toUpperCase() === 'B' ? 'B' : 'A'
-      const r = runDuty(mode === 'B' ? 'manual:B' : 'manual', mode)
+      const r = await runDuty(mode === 'B' ? 'manual:B' : 'manual', mode)
       return { ok: true, mode, ...r }
     },
   })
@@ -957,7 +958,7 @@ export function apply(ctx, config) {
     return ''
   }
 
-  const promptFor = (mode = 'A') => {
+  const promptFor = (mode = 'A', ats = []) => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-19（issue #36）：这里以前是**在路径字符串上**做 split('<家目录>') —— 空操作 ✗
@@ -1009,7 +1010,14 @@ export function apply(ctx, config) {
           ? ''
           : `\n⚠️ 但「自动评论并 @ 你」现在是**关着**的 ⇒ **一条评论都别发**，只做回复评论（下面那条照讲究）。`)
         + `\n- 回复评论：${cfg.replyToComments
-          ? `开着（每轮最多回 ${nReply} 条）—— 只回「**直接回复到我们那条评论下面**的人」，回完记进报告；找不到我们那条评论就跳过，别硬找。`
+          ? `开着（每轮最多回 ${nReply} 条）—— 回「**直接回复到我们那条评论下面**的人」，`
+            + `**另外**下面那份「评论里 @ 我们的」也要看（回法：\`bili_reply(bvid, text, rpid)\` ⇒ 楼中楼）；`
+            + `回完记进报告；找不到我们那条评论就跳过，别硬找。`
+            + (ats.length
+              ? `\n  ⭐ **评论里 @ 我们的（还没回过的）**：\n`
+                + ats.map((a) => `  - rpid ${a.rpid} · ${a.bvid} · ${a.nickname}：${a.text}`).join('\n')
+                + `\n  ⇒ **只回主人本人**的（uid=${dmOwnerUid() || '（没填，就按上面列出的这些）'}），陌生人跳过 ✓。`
+              : '')
           : '关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。'}`
         + `\n- 这一轮**不用**本地转写（没看新视频），也别去搜关键词。`
         + `\n最后用一句话汇报你补 @ 了谁。现在几点了自己看一眼系统时间。`
@@ -1086,7 +1094,16 @@ export function apply(ctx, config) {
             : (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : ''))
         : '')
       + (cfg.replyToComments
-        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
+        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 回「直接回复到你那条评论下面的人」，`
+          + `**另外**看下面那份「评论里 @ 我们的」；回完记进报告；找不到你那条评论就跳过，别硬找。`
+          + (ats.length
+            ? `\n⭐⭐ **评论里 @ 我们的（还没回过的）** —— 这些**不在**「回复我的」那个接口里，别去翻楼中楼找它们：\n`
+              + ats.map((a) => `- rpid ${a.rpid} · ${a.bvid} · ${a.nickname}：${a.text}`).join('\n')
+              + `\n  ⇒ 回法：\`bili_reply(bvid="上面的 BV 号", text="你的回复", rpid=<上面的 rpid>)\` —— 这样是**楼中楼**，`
+              + `不会在别人楼里新起一条顶层评论 ✓。`
+              + `**只回主人本人**的（uid=${dmOwnerUid() || '（没填，就按上面列出的这些）'}）；`
+              + `陌生人 @ 我们的**不回**（那一条跳过就行）；回完把 rpid 记进判重表的「评论记录」✓。`
+            : '')
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
   }
@@ -1309,6 +1326,30 @@ export function apply(ctx, config) {
     } catch { return [] }
   }
 
+  /**
+   * ⭐⭐ 2026-10-25（主人报「插件没看到我几分钟前 @ 她的评论」）：**评论里 @ 我们的**（B站 的「@我的」）。
+   *   「回复我的」（`bili_received_replies`）只有**直接回到我们那条评论下面**的 ——
+   *   在别人楼里 / 新起一条评论里 @ 我们的，只在这个接口里 ✗（真机核过：字段见 lib/atfeed.mjs）
+   *   这里顺手把**判重表里已经记过 rpid 的**、以及**不是主人本人 @ 的**滤掉 ✓
+   *   （陌生人 @ 我们不回 —— 跟私信双向一个规矩；只在「回复评论」开着时才去拉）
+   */
+  const pendingAts = async () => {
+    try {
+      const list = await listAts(stateDir, { log })
+      if (!list.length) return []
+      const owner = dmOwnerUid()
+      let seenText = ''
+      try { seenText = readFileSync(join(stateDir, 'seen.md'), 'utf8') } catch { /* 还没判重表 */ }
+      const now = Math.floor(Date.now() / 1000)
+      return list.filter((a) => {
+        if (owner && a.uid !== owner) return false            // 只回主人本人的 @
+        if (a.rpid && seenText.includes(String(a.rpid))) return false   // 判重表里记过 ⇒ 已经回过了
+        if (a.ts && now - a.ts > 2 * 86400) return false      // 两天前的就不翻旧账了
+        return true
+      }).slice(0, 5)
+    } catch (e) { log('拉「@我的」失败（不影响这一轮）：' + String(e?.message ?? e)); return [] }
+  }
+
   /** 距这个窗口结束还有多少毫秒（跨夜也算得对） */
   const windowLeftMs = (now, win) => {
     const [h, m] = String(win.end).split(':').map(Number)
@@ -1441,7 +1482,7 @@ export function apply(ctx, config) {
    * win：由调度器传进来的时段名（'morning' / 'noon' / 'evening'）；手动跑为空。
    * ⚠️ 同一时刻只允许一轮（`runningRound` 闸），由调度器维护。
    */
-  const runDuty = (why = 'window', mode = 'A', win = '') => {
+  const runDuty = async (why = 'window', mode = 'A', win = '') => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
     const dsh = resolveDsh()
@@ -1464,7 +1505,11 @@ export function apply(ctx, config) {
       log(msg)
       return { started: false, why, error: msg }
     }
-    args.push(promptFor(mode))
+    // ⭐⭐ 2026-10-25：把「评论里 @ 我们的」也喂给这一轮（B站 的「@我的」接口，只读、不花 token）——
+    //    「回复我的」里**没有**"在别人楼里 / 新评论里 @ 我们"的那些，只能从这里看 ✓
+    const ats = (cfg.replyToComments && (mode === 'A' || mode === 'B')) ? await pendingAts() : []
+    if (ats.length) log(`这一轮带上「评论里 @ 我们的」${ats.length} 条（判重表里没记过 rpid 的）`)
+    args.push(promptFor(mode, ats))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
@@ -1592,7 +1637,7 @@ export function apply(ctx, config) {
           if (left > 0) {
             saveAuto({ ...W, [k]: { ...phase, nextAt: new Date(Date.now() + ROUND_MAX_MS + gap).toISOString() } })
             bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: `${k}:A` })
-            runDuty(`window:${k}:A`, 'A', k)
+            Promise.resolve(runDuty(`window:${k}:A`, 'A', k)).catch((e) => log('起 A 轮出错（已兜住）：' + String(e?.message ?? e)))
             return
           }
           saveAuto({ ...W, [k]: { ...phase, aRan: true, aSkipped: true, nextAt: new Date().toISOString() } })
@@ -1606,7 +1651,7 @@ export function apply(ctx, config) {
           saveAuto({ ...W, [k]: { ...phase, nextAt: new Date(Date.now() + ROUND_MAX_MS + gap).toISOString() } })
           bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: `${k}:B` })
           log(`调度：${k} 起任务 B（待 @ ${pending.length} 条，已补 ${phase.bDone || 0}/${target}）`)
-          runDuty(`window:${k}:B`, 'B', k)
+          Promise.resolve(runDuty(`window:${k}:B`, 'B', k)).catch((e) => log('起 B 轮出错（已兜住）：' + String(e?.message ?? e)))
           return
         }
       }
@@ -2373,7 +2418,7 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
       const body = await readBody(req).catch(() => ({}))
       const mode = String(body?.mode || 'A').toUpperCase() === 'B' ? 'B' : 'A'
-      return sendJson(res, 200, { ok: true, mode, ...runDuty(mode === 'B' ? 'manual:B' : 'manual', mode) })
+      return sendJson(res, 200, { ok: true, mode, ...(await runDuty(mode === 'B' ? 'manual:B' : 'manual', mode)) })
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）

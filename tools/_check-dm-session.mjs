@@ -20,6 +20,7 @@
  *      桶名用**从 DSH 源码抄下来的** `projectKey` 参考实现算（见下面 projectKeyRef）
  *   ⑩ 人设（AGENTS.md）**只在新会话 / 设定变过时贴**：新会话带全文、续会话不重复贴、设定改过再贴一次
  *   ⑪ 投递方式「**评论（不 @）+ 私信**」那一档：提示词明说"不许 @ 任何人"、也不再要「要 @ 谁」
+ *   ⑫ 「评论里 @ 我们的」（B站 的「@我的」）：主人 @ 的会列进提示词；陌生人 @ 的、判重表里记过的都不列
  *
  * 用法：`node tools/_check-dm-session.mjs`（约 30 秒；退出码 0 = 全过）
  */
@@ -87,6 +88,10 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
   hasNoAt: argv.some((a) => a.includes('不许 @ 任何人')),
   hasAt: argv.some((a) => a.includes('每条在正文里纯文本 @')),
   has300: argv.some((a) => a.includes('300 字')),
+  hasAtList: argv.some((a) => a.includes('评论里 @ 我们的')),
+  hasAt111: argv.some((a) => a.includes('rpid 111')),
+  hasAt222: argv.some((a) => a.includes('rpid 222')),
+  hasAt333: argv.some((a) => a.includes('rpid 333')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -113,13 +118,16 @@ const cfg = {
   peakValley: false, perDay: 5, workspace: WS,
   // ⭐ 投递方式特意选「评论（不 @）+ 私信」，并且**不填「要 @ 谁」** —— 验那一档的提示词
   dmMode: 'both-noat', autoComment: true, mentionName: '', dmUid: 424242,
+  replyToComments: true,   // ⭐ 顺带验「评论里 @ 我们的」那条链路（走 B站 的 @我的 接口）
   _set: ['dshBin', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid', 'peakValley', 'perDay', 'workspace',
-    'dmMode', 'autoComment', 'mentionName', 'dmUid'],
+    'dmMode', 'autoComment', 'mentionName', 'dmUid', 'replyToComments'],
 }
 writeFileSync(join(STATE, 'config.json'), JSON.stringify(cfg, null, 2))
 writeFileSync(join(STATE, 'bili_credential.json'), JSON.stringify({ sessdata: 'fake', bili_jct: 'fake', buvid3: 'fake', dedeuserid: '999' }))
 // 先记成"这条已经回过了"⇒ 私信那一跳不会自己开跑，全由下面 nextKey 控制
 writeFileSync(join(STATE, 'dm-seen.json'), JSON.stringify({ 42: 'seen-k' }))
+// ⭐ 判重表里已经记过 rpid 333（那条 @ 不该再列给这一轮）；101 是另一条无关记录
+writeFileSync(join(STATE, 'seen.md'), '- 2026-10-20 · BV1ccccccccc rpid 333 · 已经回过了\n- 2026-10-20 · BV1zzzzzzzzz rpid 101 · 无关记录\n')
 
 // ── 假 B站：只拦两个 URL ──
 const realFetch = globalThis.fetch
@@ -130,6 +138,16 @@ globalThis.fetch = async (url) => {
   const json = (obj) => ({ status: 200, json: async () => obj })
   if (u.includes('get_sessions')) {
     return json({ code: 0, data: { session_list: [{ talker_id: talkerUid, unread_count: 1, last_msg: { content: JSON.stringify({ content: '在吗' }), timestamp: 1 } }] } })
+  }
+  if (u.includes('msgfeed/at')) {                      // ⭐「评论里 @ 我们的」（@我的）
+    return json({ code: 0, data: { items: [
+      { user: { mid: 42, nickname: '主人' }, at_time: Math.floor(Date.now() / 1000) - 60,
+        item: { type: 'reply', uri: 'https://www.bilibili.com/video/BV1aaaaaaaaa', source_id: 111, target_id: 0, source_content: '@本鲸 记一下这条' } },
+      { user: { mid: 999, nickname: '陌生人' }, at_time: Math.floor(Date.now() / 1000) - 60,
+        item: { type: 'reply', uri: 'https://www.bilibili.com/video/BV1bbbbbbbbb', source_id: 222, target_id: 0, source_content: '@本鲸 帮我看个视频' } },
+      { user: { mid: 42, nickname: '主人' }, at_time: Math.floor(Date.now() / 1000) - 60,
+        item: { type: 'reply', uri: 'https://www.bilibili.com/video/BV1ccccccccc', source_id: 333, target_id: 0, source_content: '@本鲸 这条已经回过了' } },
+    ] } })
   }
   if (u.includes('fetch_session_msgs')) {
     // ⚠️ B站 这个接口是**倒序**的（新的在前）—— lib/dm.mjs 会 reverse 一遍
@@ -187,6 +205,9 @@ try {
   check(duty.hasNoAt === true, '「评论（不 @）+ 私信」那一档：提示词明说**不许 @ 任何人**')
   check(duty.hasAt === false, '那一档里没有"纯文本 @ 要 @ 谁"那套（**不用填「要 @ 谁」**）')
   check(duty.has300 === true, '评论字数上限是 **300 字**（2026-10-25 从 150 放宽）')
+  check(duty.hasAtList === true && duty.hasAt111 === true, '「评论里 @ 我们的」列进了提示词（主人 @ 的那条）')
+  check(duty.hasAt222 === false, '陌生人 @ 的**不列**（只回主人本人的）')
+  check(duty.hasAt333 === false, '判重表里记过 rpid 的**不重复列**（已经回过了）')
   check(dmRec() === null, '值班轮不碰 dm-session.json')
 
   /* ② 第一条私信：新开 + 记账 */
