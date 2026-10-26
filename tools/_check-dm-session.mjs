@@ -21,6 +21,7 @@
  *   ⑩ 人设（AGENTS.md）**只在新会话 / 设定变过时贴**：新会话带全文、续会话不重复贴、设定改过再贴一次
  *   ⑪ 投递方式「**评论（不 @）+ 私信**」那一档：提示词明说"不许 @ 任何人"、也不再要「要 @ 谁」
  *   ⑫ 「评论里 @ 我们的」（B站 的「@我的」）：主人 @ 的会列进提示词；陌生人 @ 的、判重表里记过的都不列
+ *   ⑬ 评论贴表情的**概率 1/3 由宿主掷骰子**（不是让模型自己估）：没中 ⇒ 纯文字，中了 ⇒ 才允许贴（两条分支都验）
  *
  * 用法：`node tools/_check-dm-session.mjs`（约 30 秒；退出码 0 = 全过）
  */
@@ -92,6 +93,8 @@ const say = (o) => appendFileSync(LOG, JSON.stringify({
   hasAt111: argv.some((a) => a.includes('rpid 111')),
   hasAt222: argv.some((a) => a.includes('rpid 222')),
   hasAt333: argv.some((a) => a.includes('rpid 333')),
+  hasEmoteOff: argv.some((a) => a.includes('掷骰子没中')),
+  hasEmoteOn: argv.some((a) => a.includes('掷骰子中了')),
   short: argv.map((a) => (a.length > 40 ? a.slice(0, 40) + '…' : a)),
 }) + '\\n')
 say({ begin: true })
@@ -164,6 +167,7 @@ globalThis.fetch = async (url) => {
 // ── 起插件（假 ctx：真给 HTTP 路由和工具）──
 process.env.DSH_HOME = HOME
 process.env.BILI_DUTY_DM_TICK_SEC = '1'          // 私信那一跳：1 秒（只为预检）
+process.env.BILI_DUTY_EMOTE_CHANCE = '0'         // 贴表情的骰子先钉成 0（后面再钉成 1 验另一条分支）
 let handler = null
 const mod = await import(join(import.meta.dirname, '..', 'index.js'))
 mod.apply({
@@ -208,6 +212,16 @@ try {
   check(duty.hasAtList === true && duty.hasAt111 === true, '「评论里 @ 我们的」列进了提示词（主人 @ 的那条）')
   check(duty.hasAt222 === false, '陌生人 @ 的**不列**（只回主人本人的）')
   check(duty.hasAt333 === false, '判重表里记过 rpid 的**不重复列**（已经回过了）')
+  check(duty.hasEmoteOff === true, '贴表情的骰子没中 ⇒ 提示词明说**只发纯文字**')
+
+  // ⭐ 贴表情概率（1/3）由**宿主掷**：把骰子钉成 1 再跑一轮，验另一条分支
+  process.env.BILI_DUTY_EMOTE_CHANCE = '1'
+  const beforeRoll = logLines().length
+  await POST('/api/bili-duty/run', { mode: 'A' })
+  await until(() => logLines().length > beforeRoll, 6000, '第二轮值班轮（骰子=1）')
+  const dutyOn = logLines()[beforeRoll] || {}
+  check(dutyOn.hasEmoteOn === true, '骰子中了 ⇒ 提示词**允许**贴一张（中签 ≠ 必须贴）')
+  process.env.BILI_DUTY_EMOTE_CHANCE = '0'
   check(dmRec() === null, '值班轮不碰 dm-session.json')
 
   /* ② 第一条私信：新开 + 记账 */

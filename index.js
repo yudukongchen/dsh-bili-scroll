@@ -472,6 +472,19 @@ export function apply(ctx, config) {
     const ws = String(cfg.workspace || '').trim()
     return ws ? join(ws, 'memes') : ''
   }
+  /**
+   * ⭐⭐ 2026-10-26（主人要的）：**评论贴表情的概率 = 1/3**。
+   *   ⚠️ 让模型自己"按 1/3 概率"掷是不靠谱的（它不是随机数发生器）⇒ **宿主先掷一次**，
+   *   再把"这一条允许贴 / 只发纯文字"明明白白写进提示词 ✓（每轮掷一次，A 轮 B 轮都算）。
+   *   env `BILI_DUTY_EMOTE_CHANCE`（0~1）只给本地预检用（把骰子钉成 0 / 1 验两条分支），生产没人设它。
+   */
+  const emoteChanceNow = () => {
+    const raw = process.env.BILI_DUTY_EMOTE_CHANCE
+    const v = raw === undefined || raw === '' ? NaN : Number(raw)
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1 / 3
+  }
+  const rollEmote = () => Math.random() < emoteChanceNow()
+
   /** 塞进 MCP env 的那份（空字符串 = 不下发，Python 退回它自己家目录里的 memes/） */
   const memeEnv = () => {
     const d = memeDir()
@@ -1000,7 +1013,11 @@ export function apply(ctx, config) {
         + (pending.length
           ? `\n- 从里面**挑一个**（最值得占用主人一次注意力的），用 \`bili_reply\` 在它下面发**一条**评论：`
             + `正文里**纯文本 @ ${cfg.mentionName}**、≤300 字、短干净像人话。`
-            + `（想贴一张本地表情就按章程「发表情」那节的规矩来，**默认不贴**。）`
+            + (memeDir()
+              ? (rollEmote()
+                ? `（⭐ 这一轮掷骰子中了 1/3：**可以**贴一张，但图得正好接得住那句话、场子合适；拿不准就纯文字。）`
+                : `（⭐ 这一轮掷骰子没中：**只发纯文字**，别贴表情。）`)
+              : '')
           : `\n- 这一轮**没有待 @ 的** ⇒ **不要发任何新评论**，只做下面的回复评论。`)
         + `\n🔴🔴 **不要写 \`### BV号\` 这种标题行，也不要挑新视频**（今天额度早就满了；宿主拿 \`### BV\` 数配额，`
         + `B 轮写了会吃掉主人今天的额度 ✗）；B 轮**没有看新视频**，所以归档不用动。`
@@ -1068,9 +1085,12 @@ export function apply(ctx, config) {
             : '关着的（只写报告，别发评论）')}。`)
       + (commentOn
         ? (memeDir()
-          ? `⭐ 表情包库（本地）：${memeDir()} —— 发评论时想贴一张就先 \`bili_emote_list\` 挑 id，`
-            + `再给 \`bili_reply\` 传 \`emote\`（那是**图片评论**）。⚠️ **绝大多数评论别贴图**（一条评论最多一张），`
-            + `什么时候值得贴、怎么选，看章程里「发表情」那节；图有问题时它会自己退回纯文字。`
+          ? (rollEmote()
+            ? `⭐ 表情包库（本地）：${memeDir()} —— **这一轮掷骰子中了（贴图概率 1/3）**：想贴就先用 \`bili_emote_list\` 挑 id，`
+              + `再给 \`bili_reply\` 传 \`emote\`（那是**图片评论**，一条评论最多一张）。`
+              + `⚠️ **中签 ≠ 必须贴**：图得**正好接得住那句话**、场子也合适（**求助 / 悼念 / 吵架 / 严肃科普的下面不贴**），`
+              + `拿不准就纯文字；图有问题时它会自己退回纯文字 ✓。`
+            : `⭐ 表情包库（本地）：${memeDir()} —— **这一轮掷骰子没中（贴图概率 1/3）**：这一条**只发纯文字**，别贴表情。`)
           : `⭐ 表情包库：这一轮没有（设置里的「工作区」没填）⇒ \`emote\` 用不了，别试，纯文字评论。`)
         : '')
       + (dmOn

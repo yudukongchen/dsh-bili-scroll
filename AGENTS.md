@@ -48,7 +48,7 @@
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；
-  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 30 秒、十二件事、39 项断言，不花 token；
+  `node tools/_check-dm-session.mjs` 验「私信回复续同一条会话」（假 dsh + 假 B站，约 40 秒、十三件事、41 项断言，不花 token；
   家目录特意带**空格 + 中文**，用来盯"会话桶名有没有又猜错"）
 
 ## 约定
@@ -66,6 +66,9 @@
   ⭐ **新开一条时把最近 ≤6 句私信贴进去**（`opts.history`，从 dmTick 刚拉到的消息来）——
   续不上（被 GUI 占着写锁 / 被删 / per-round）也不失忆；续上则不贴（历史里连着）
 - **每条公开评论 ≤300 字**（2026-10-25 从 150 放宽；提示词里明说，章程里也有同一句）
+- **评论贴表情 = 每轮 1/3**（2026-10-26 起）：**宿主掷骰子**（`rollEmote()`，`emoteChanceNow()` 一处可调），
+  再把"中了/没中"写进提示词 —— 别让模型自己估概率；没中就纯文字，中了也还要"接得住 + 场子合适"才贴
+  （本地预检用 `BILI_DUTY_EMOTE_CHANCE=0|1` 钉死骰子）
 - **投递方式**（`dmMode`，四档）：`off` 只评论（评论里 @ 你）· `only` 只私信 · `both` 评论（@ 你）+ 私信 ·
   ⭐ `both-noat`（2026-10-25 加）**评论（不 @ 任何人）+ 私信** —— 这一档**不用填「要 @ 谁」**；
   判据只有一处 `commentOnNow()`（提示词与工具层那个闸共用）；评论总开关仍是「自动评论」
